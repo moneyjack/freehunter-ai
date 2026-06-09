@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="zh-Hant-HK">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Freehunter AI Job Dashboard</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Freehunter AI Ops</p>
+          <h1>工作板 Dashboard</h1>
+        </div>
+        <div class="topbar-actions">
+          <button class="button secondary" id="exportCsvButton" type="button">Export CSV</button>
+          <button class="button primary" id="refreshButton" type="button">Refresh + score</button>
+        </div>
+      </header>
+
+      <section class="metric-strip" aria-label="Dashboard summary">
+        <article class="metric">
+          <span class="metric-label">Recent Jobs</span>
+          <strong id="metricJobs">-</strong>
+        </article>
+        <article class="metric">
+          <span class="metric-label">Client Emails</span>
+          <strong id="metricEmails">-</strong>
+        </article>
+        <article class="metric">
+          <span class="metric-label">Approval Queue</span>
+          <strong id="metricApprovalQueue">-</strong>
+        </article>
+        <article class="metric">
+          <span class="metric-label">LLM Pending</span>
+          <strong id="metricLlmPending">-</strong>
+        </article>
+        <article class="metric">
+          <span class="metric-label">Easy Leads</span>
+          <strong id="metricApproved">-</strong>
+        </article>
+        <article class="metric">
+          <span class="metric-label">Latest</span>
+          <strong id="metricLatest">-</strong>
+        </article>
+      </section>
+
+      <section class="filters" aria-label="Filters">
+        <label class="search-box">
+          <span>Search</span>
+          <input id="searchInput" type="search" placeholder="Title, detail, client, email, skill..." autocomplete="off" />
+        </label>
+        <label>
+          <span>Status</span>
+          <select id="statusFilter"></select>
+        </label>
+        <label>
+          <span>Category</span>
+          <select id="categoryFilter"></select>
+        </label>
+        <label>
+          <span>Duration</span>
+          <select id="durationFilter"></select>
+        </label>
+        <label>
+          <span>AI Fit</span>
+          <select id="aiStatusFilter"></select>
+        </label>
+        <label>
+          <span>Pipeline</span>
+          <select id="pipelineStatusFilter"></select>
+        </label>
+        <label>
+          <span>Sort</span>
+          <select id="sortSelect">
+            <option value="aiScore">AI score</option>
+            <option value="newest">Newest first</option>
+            <option value="modified">Recently modified</option>
+            <option value="budget">Budget high to low</option>
+            <option value="email">Email found first</option>
+          </select>
+        </label>
+        <label class="checkline">
+          <input id="emailOnlyFilter" type="checkbox" />
+          <span>Has email</span>
+        </label>
+        <label class="checkline">
+          <input id="retainerOnlyFilter" type="checkbox" />
+          <span>AI retainer</span>
+        </label>
+      </section>
+
+      <div class="status-line" id="statusLine" role="status">Loading latest 30 days of Freehunter jobs and client emails...</div>
+      <div class="ops-line" id="opsLine">Dashboard: loading runtime info...</div>
+
+      <section class="agent-flow" aria-label="AI manager workflow">
+        <div>
+          <span class="metric-label">Manager Flow</span>
+          <strong>Dashboard → Hermes → Codex → Jack approval → Client</strong>
+        </div>
+        <ol>
+          <li>Score job</li>
+          <li>Approve outreach</li>
+          <li>Log replies</li>
+          <li>Create workspace</li>
+          <li>Pass to Hermes</li>
+          <li>Codex builds</li>
+          <li>Approve send</li>
+        </ol>
+      </section>
+
+      <main class="workspace">
+        <section class="job-list-panel" aria-label="Job list">
+          <div class="panel-title-row">
+            <h2>Jobs</h2>
+            <span id="visibleCount">0 shown</span>
+          </div>
+          <div class="job-list" id="jobList"></div>
+        </section>
+
+        <section class="detail-panel" aria-label="Selected job detail">
+          <div id="jobDetail" class="empty-detail">
+            <p>Select a job to inspect the full brief, company notes, and client email.</p>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>
