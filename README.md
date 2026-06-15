@@ -119,6 +119,56 @@ npm run pipeline:run
 
 This is the command to schedule with cron or ask Hermes Agent to run.
 
+## Deploy To Vercel
+
+This app can run on Vercel as a static dashboard plus one serverless API function.
+
+Vercel deploy files:
+
+- `vercel.json`
+- `api/index.js`
+- `public/`
+- `server.js`
+
+Important: Vercel serverless file writes are not durable. If `STORE_PROVIDER=file`, the app uses `/tmp` on Vercel and may lose workflow state after cold starts. Use Supabase for a real deployed dashboard.
+
+### Persistent Store With Supabase
+
+Create this table in Supabase:
+
+```sql
+create table if not exists public.freehunter_state (
+  key text primary key,
+  value jsonb not null default '{}'::jsonb,
+  updated_at timestamptz not null default now()
+);
+```
+
+Set these Vercel environment variables:
+
+```bash
+STORE_PROVIDER=supabase
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=...
+SUPABASE_STORE_TABLE=freehunter_state
+SUPABASE_STORE_KEY=store
+```
+
+Also set the LLM provider variables if you want `Refresh + score` to run paid AI analysis on Vercel:
+
+```bash
+LLM_ANALYSIS_PROVIDER=openrouter
+LLM_ENABLE_NETWORK_ANALYSIS=1
+OPENROUTER_API_KEY=sk-or-...
+OPENROUTER_ANALYSIS_MODEL=deepseek/deepseek-v4-flash
+LLM_INPUT_USD_PER_1M=0.0983
+LLM_OUTPUT_USD_PER_1M=0.1966
+LLM_DAILY_USD_CAP=3
+LLM_MONTHLY_USD_CAP=50
+```
+
+Without `OPENROUTER_API_KEY`, the deployed dashboard still fetches Freehunter jobs and emails, but uses local rule scoring only.
+
 ## LLM Provider Modes
 
 Default is free local rule mode:
@@ -179,6 +229,11 @@ LLM_REQUEST_TIMEOUT_MS=60000
 JOB_LOOKBACK_DAYS=30
 DATA_DIR=./data
 PROJECTS_DIR=./projects
+STORE_PROVIDER=file
+SUPABASE_URL=
+SUPABASE_SERVICE_ROLE_KEY=
+SUPABASE_STORE_TABLE=freehunter_state
+SUPABASE_STORE_KEY=store
 HERMES_HANDOFF_MODE=file
 HERMES_OUTBOX_DIR=./data/hermes-outbox
 HERMES_AGENT_WEBHOOK_URL=

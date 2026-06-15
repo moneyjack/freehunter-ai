@@ -153,16 +153,18 @@ async function loadRuntimeInfo() {
     state.runtime = payload;
     const llm = payload.llm || {};
     const hermes = payload.hermes || {};
+    const store = payload.store || {};
     els.opsLine.textContent = [
       `Dashboard ${window.location.origin}`,
       'Start: npm start',
-      `Store: ${payload.storePath || 'data/store.json'}`,
+      `Store: ${store.provider || 'file'}${store.persistent === false ? ' (temporary)' : ''}`,
+      store.path ? `Path: ${store.path}` : '',
       `Projects: ${payload.projectsDir || './projects'}`,
       `LLM: ${llm.provider || '-'} / ${llm.model || '-'}`,
       `Hermes: ${hermes.mode || 'file'}${hermes.webhookConfigured ? ' + webhook' : ' outbox'}`,
       `Outbox: ${hermes.outboxDir || 'data/hermes-outbox'}`,
       'Email send: not configured'
-    ].join(' · ');
+    ].filter(Boolean).join(' · ');
   } catch {
     els.opsLine.textContent = `Dashboard ${window.location.origin} · Start: npm start · Store: data/store.json`;
   }

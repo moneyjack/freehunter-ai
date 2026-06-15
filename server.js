@@ -9,6 +9,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 loadEnvFile(path.join(__dirname, '.env'));
 
+const IS_VERCEL = process.env.VERCEL === '1';
 const PORT = Number(process.env.PORT || 4173);
 const HOST = process.env.HOST || '127.0.0.1';
 const API_BASE = process.env.FREEHUNTER_API_BASE || 'https://freehunter.hk/apis/jobs';
@@ -17,9 +18,14 @@ const EMAIL_CONCURRENCY = Number(process.env.EMAIL_CONCURRENCY || 8);
 const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS || 20000);
 const LLM_REQUEST_TIMEOUT_MS = Number(process.env.LLM_REQUEST_TIMEOUT_MS || 60000);
 const DEFAULT_LOOKBACK_DAYS = Number(process.env.JOB_LOOKBACK_DAYS || 30);
-const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
+const DATA_DIR = process.env.DATA_DIR || (IS_VERCEL ? path.join('/tmp', 'freehunter-ai-data') : path.join(__dirname, 'data'));
 const STORE_PATH = process.env.STORE_PATH || path.join(DATA_DIR, 'store.json');
-const PROJECTS_DIR = process.env.PROJECTS_DIR || path.join(__dirname, 'projects');
+const STORE_PROVIDER = (process.env.STORE_PROVIDER || (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY ? 'supabase' : 'file')).toLowerCase();
+const SUPABASE_URL = trimTrailingSlash(process.env.SUPABASE_URL || '');
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+const SUPABASE_STORE_TABLE = process.env.SUPABASE_STORE_TABLE || 'freehunter_state';
+const SUPABASE_STORE_KEY = process.env.SUPABASE_STORE_KEY || 'store';
+const PROJECTS_DIR = process.env.PROJECTS_DIR || (IS_VERCEL ? path.join('/tmp', 'freehunter-ai-projects') : path.join(__dirname, 'projects'));
 const HERMES_OUTBOX_DIR = process.env.HERMES_OUTBOX_DIR || path.join(DATA_DIR, 'hermes-outbox');
 const HERMES_AGENT_WEBHOOK_URL = (process.env.HERMES_AGENT_WEBHOOK_URL || '').trim();
 const HERMES_AGENT_TOKEN = process.env.HERMES_AGENT_TOKEN || '';
@@ -83,7 +89,7 @@ const mimeTypes = new Map([
   ['.ico', 'image/x-icon']
 ]);
 
-const server = http.createServer(async (req, res) => {
+async function handleRequest(req, res) {
   try {
     const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
 
@@ -91,6 +97,7 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, {
         ok: true,
         cacheTtlMs: CACHE_TTL_MS,
+        store: publicStoreConfig(),
         storePath: STORE_PATH,
         projectsDir: PROJECTS_DIR,
         hermes: publicHermesConfig(),
@@ -183,9 +190,16 @@ const server = http.createServer(async (req, res) => {
       message: error instanceof Error ? error.message : String(error)
     });
   }
-});
+}
 
-listen(PORT);
+const server = http.createServer(handleRequest);
+
+if (!IS_VERCEL) {
+  listen(PORT);
+}
+
+export { handleRequest };
+export default handleRequest;
 
 async function getEnrichedJobs({ forceRefresh = false, lookbackDays = DEFAULT_LOOKBACK_DAYS, llmLimit = LLM_TRIAGE_MAX_JOBS } = {}) {
   const now = Date.now();
@@ -977,6 +991,10 @@ async function readJsonBody(req) {
 }
 
 async function readStore() {
+  if (STORE_PROVIDER === 'supabase') {
+    return readSupabaseStore();
+  }
+
   try {
     const text = await readFile(STORE_PATH, 'utf8');
     const store = JSON.parse(text);
@@ -992,8 +1010,67 @@ async function readStore() {
 async function writeStore(store) {
   const normalized = normalizeStore(store);
   normalized.updatedAt = new Date().toISOString();
+  if (STORE_PROVIDER === 'supabase') {
+    await writeSupabaseStore(normalized);
+    return;
+  }
+
   await mkdir(path.dirname(STORE_PATH), { recursive: true });
   await writeFile(STORE_PATH, `${JSON.stringify(normalized, null, 2)}\n`, 'utf8');
+}
+
+async function readSupabaseStore() {
+  assertSupabaseStoreConfigured();
+  const endpoint = `${SUPABASE_URL}/rest/v1/${SUPABASE_STORE_TABLE}?select=value&key=eq.${encodeURIComponent(SUPABASE_STORE_KEY)}&limit=1`;
+  const payload = await fetchSupabaseJson(endpoint, { method: 'GET' });
+  const row = Array.isArray(payload) ? payload[0] : null;
+  return normalizeStore(row?.value || {});
+}
+
+async function writeSupabaseStore(store) {
+  assertSupabaseStoreConfigured();
+  const endpoint = `${SUPABASE_URL}/rest/v1/${SUPABASE_STORE_TABLE}`;
+  await fetchSupabaseJson(endpoint, {
+    method: 'POST',
+    headers: {
+      Prefer: 'resolution=merge-duplicates,return=minimal'
+    },
+    body: JSON.stringify({
+      key: SUPABASE_STORE_KEY,
+      value: store,
+      updated_at: store.updatedAt
+    })
+  });
+}
+
+function assertSupabaseStoreConfigured() {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+    throw new Error('Supabase store requires SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY');
+  }
+}
+
+async function fetchSupabaseJson(url, options = {}) {
+  const response = await fetch(url, {
+    ...options,
+    headers: {
+      apikey: SUPABASE_SERVICE_ROLE_KEY,
+      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      ...(options.headers || {})
+    }
+  });
+
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(`Supabase store ${response.status} ${response.statusText}: ${text.slice(0, 300)}`);
+  }
+  if (!text.trim()) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error('Invalid JSON from Supabase store');
+  }
 }
 
 function normalizeStore(store) {
@@ -2446,6 +2523,18 @@ function publicHermesConfig() {
     webhookConfigured: Boolean(HERMES_AGENT_WEBHOOK_URL),
     tokenConfigured: Boolean(HERMES_AGENT_TOKEN),
     requestTimeoutMs: HERMES_REQUEST_TIMEOUT_MS
+  };
+}
+
+function publicStoreConfig() {
+  return {
+    provider: STORE_PROVIDER,
+    path: STORE_PROVIDER === 'file' ? STORE_PATH : '',
+    supabaseConfigured: Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY),
+    supabaseTable: STORE_PROVIDER === 'supabase' ? SUPABASE_STORE_TABLE : '',
+    supabaseKey: STORE_PROVIDER === 'supabase' ? SUPABASE_STORE_KEY : '',
+    persistent: STORE_PROVIDER === 'supabase' || !IS_VERCEL,
+    runtime: IS_VERCEL ? 'vercel' : 'local'
   };
 }
 

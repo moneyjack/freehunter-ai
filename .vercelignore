@@ -1,8 +1,5 @@
 .env
 data/
 projects/
-data/*.tmp
 node_modules/
 .DS_Store
-.vercel/
-.vercel
