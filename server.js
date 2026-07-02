@@ -13,6 +13,52 @@ const IS_VERCEL = process.env.VERCEL === '1';
 const PORT = Number(process.env.PORT || 4173);
 const HOST = process.env.HOST || '127.0.0.1';
 const API_BASE = process.env.FREEHUNTER_API_BASE || 'https://freehunter.hk/apis/jobs';
+const FREEHUNTER_ENABLED = process.env.FREEHUNTER_ENABLED !== '0';
+const FREELANCER_ENABLED = process.env.FREELANCER_ENABLED !== '0';
+const FREELANCER_SEARCH_BASE = process.env.FREELANCER_SEARCH_BASE || 'https://www.freelancer.com/ajax/table/project_contest_datatable.php';
+const FREELANCER_PROJECT_BASE = process.env.FREELANCER_PROJECT_BASE || 'https://www.freelancer.com';
+const FREELANCER_KEYWORDS = parseCsvList(process.env.FREELANCER_KEYWORDS || [
+  'website',
+  'website design',
+  'web design',
+  'landing page',
+  'wordpress website',
+  'shopify website',
+  'logo design',
+  'graphic design'
+].join(','));
+const FREELANCER_RESULTS_PER_KEYWORD = Number(process.env.FREELANCER_RESULTS_PER_KEYWORD || 50);
+const FREELANCER_ID_OFFSET = Number(process.env.FREELANCER_ID_OFFSET || 800000000000);
+const UPWORK_ACCESS_TOKEN = process.env.UPWORK_ACCESS_TOKEN || process.env.UPWORK_API_TOKEN || '';
+const UPWORK_ENABLED = process.env.UPWORK_ENABLED === '1' || (Boolean(UPWORK_ACCESS_TOKEN) && process.env.UPWORK_ENABLED !== '0');
+const UPWORK_GRAPHQL_URL = process.env.UPWORK_GRAPHQL_URL || 'https://api.upwork.com/graphql';
+const UPWORK_PROJECT_BASE = process.env.UPWORK_PROJECT_BASE || 'https://www.upwork.com';
+const UPWORK_KEYWORDS = parseCsvList(process.env.UPWORK_KEYWORDS || [
+  'website',
+  'website design',
+  'web design',
+  'landing page',
+  'wordpress website',
+  'shopify website',
+  'logo design',
+  'graphic design'
+].join(','));
+const UPWORK_RESULTS_PER_KEYWORD = Number(process.env.UPWORK_RESULTS_PER_KEYWORD || 25);
+const UPWORK_DAYS_POSTED = Number(process.env.UPWORK_DAYS_POSTED || 30);
+const UPWORK_ID_OFFSET = Number(process.env.UPWORK_ID_OFFSET || 900000000000);
+const PUBLIC_BASE_URL = trimTrailingSlash(
+  process.env.PUBLIC_BASE_URL ||
+  process.env.APP_BASE_URL ||
+  (process.env.VERCEL_PROJECT_PRODUCTION_URL ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}` : '') ||
+  (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : '') ||
+  `http://${HOST}:${PORT}`
+);
+const UPWORK_CLIENT_ID = process.env.UPWORK_CLIENT_ID || '';
+const UPWORK_CLIENT_SECRET = process.env.UPWORK_CLIENT_SECRET || '';
+const UPWORK_REDIRECT_URI = process.env.UPWORK_REDIRECT_URI || `${PUBLIC_BASE_URL}/api/upwork/callback`;
+const UPWORK_OAUTH_AUTHORIZE_URL = process.env.UPWORK_OAUTH_AUTHORIZE_URL || 'https://www.upwork.com/ab/account-security/oauth2/authorize';
+const UPWORK_OAUTH_TOKEN_URL = process.env.UPWORK_OAUTH_TOKEN_URL || 'https://www.upwork.com/api/v3/oauth2/token';
+const UPWORK_OAUTH_STATE = process.env.UPWORK_OAUTH_STATE || '';
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 5 * 60 * 1000);
 const EMAIL_CONCURRENCY = Number(process.env.EMAIL_CONCURRENCY || 8);
 const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS || 20000);
@@ -89,6 +135,59 @@ const mimeTypes = new Map([
   ['.ico', 'image/x-icon']
 ]);
 
+const UPWORK_JOB_SEARCH_QUERY = `
+  query UpworkJobSearch($filter: MarketplaceJobPostingsSearchFilter, $sortAttributes: [MarketplaceJobPostingsSearchSortAttribute!]) {
+    marketplaceJobPostingsSearch(filter: $filter, sortAttributes: $sortAttributes) {
+      totalCount
+      edges {
+        node {
+          id
+          ciphertext
+          title
+          description
+          createdDateTime
+          publishedDateTime
+          duration
+          engagement
+          jobType
+          workload
+          url
+          skills {
+            name
+            prettyName
+            prefLabel
+          }
+          amount {
+            rawValue
+            currency
+            displayValue
+          }
+          hourlyBudgetMin {
+            rawValue
+            currency
+            displayValue
+          }
+          hourlyBudgetMax {
+            rawValue
+            currency
+            displayValue
+          }
+          client {
+            totalSpent {
+              rawValue
+              currency
+              displayValue
+            }
+            location {
+              country
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
 async function handleRequest(req, res) {
   try {
     const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
@@ -100,6 +199,7 @@ async function handleRequest(req, res) {
         store: publicStoreConfig(),
         storePath: STORE_PATH,
         projectsDir: PROJECTS_DIR,
+        sources: publicSourceConfig(),
         hermes: publicHermesConfig(),
         llm: publicLlmConfig()
       });
@@ -111,6 +211,18 @@ async function handleRequest(req, res) {
       const llmLimit = parseLlmLimit(url.searchParams.get('llmLimit'));
       const payload = await getEnrichedJobs({ forceRefresh, lookbackDays, llmLimit });
       return sendJson(res, 200, payload);
+    }
+
+    if (url.pathname === '/api/upwork/oauth/config') {
+      return sendJson(res, 200, publicUpworkOAuthConfig());
+    }
+
+    if (url.pathname === '/api/upwork/oauth/start') {
+      return startUpworkOAuth(url, res);
+    }
+
+    if (url.pathname === '/api/upwork/callback') {
+      return handleUpworkCallback(url, res);
     }
 
     if (url.pathname === '/api/store') {
@@ -136,6 +248,13 @@ async function handleRequest(req, res) {
     if (url.pathname === '/api/draft' && req.method === 'POST') {
       const body = await readJsonBody(req);
       const payload = await updateDraft(body);
+      jobsCache.clear();
+      return sendJson(res, 200, payload);
+    }
+
+    if (url.pathname === '/api/job-ai-draft' && req.method === 'POST') {
+      const body = await readJsonBody(req);
+      const payload = await generateJobAiDraft(body);
       jobsCache.clear();
       return sendJson(res, 200, payload);
     }
@@ -203,7 +322,12 @@ export default handleRequest;
 
 async function getEnrichedJobs({ forceRefresh = false, lookbackDays = DEFAULT_LOOKBACK_DAYS, llmLimit = LLM_TRIAGE_MAX_JOBS } = {}) {
   const now = Date.now();
-  const cacheKey = `${lookbackDays ? `days:${lookbackDays}` : 'all'}:llm:${llmLimit}`;
+  const sourceSignature = [
+    FREEHUNTER_ENABLED ? 'freehunter' : '',
+    FREELANCER_ENABLED ? `freelancer:${FREELANCER_KEYWORDS.join('|')}:${FREELANCER_RESULTS_PER_KEYWORD}` : '',
+    UPWORK_ENABLED ? `upwork:${UPWORK_KEYWORDS.join('|')}:${UPWORK_RESULTS_PER_KEYWORD}:${UPWORK_DAYS_POSTED}:${Boolean(UPWORK_ACCESS_TOKEN)}` : ''
+  ].filter(Boolean).join(',');
+  const cacheKey = `${lookbackDays ? `days:${lookbackDays}` : 'all'}:llm:${llmLimit}:sources:${sourceSignature}`;
   const cached = jobsCache.get(cacheKey);
   const cacheFresh = cached?.data && now - cached.fetchedAt < CACHE_TTL_MS;
 
@@ -224,7 +348,10 @@ async function getEnrichedJobs({ forceRefresh = false, lookbackDays = DEFAULT_LO
     ? rawJobs.filter((job) => getJobCreatedAtSeconds(job) >= cutoffSeconds)
     : rawJobs;
   const uniqueClientIds = [
-    ...new Set(recentRawJobs.map((job) => job.user_id).filter((id) => id !== null && id !== undefined))
+    ...new Set(recentRawJobs
+      .filter((job) => job.source === 'freehunter' || !job.source)
+      .map((job) => job.user_id)
+      .filter((id) => id !== null && id !== undefined))
   ];
 
   const emailEntries = await mapLimit(uniqueClientIds, EMAIL_CONCURRENCY, async (clientId) => {
@@ -248,6 +375,19 @@ async function getEnrichedJobs({ forceRefresh = false, lookbackDays = DEFAULT_LO
   const meta = {
     count: jobs.length,
     sourceCount: rawJobs.length,
+    sources: buildSourceSummary(jobs, rawJobs),
+    freelancer: {
+      enabled: FREELANCER_ENABLED,
+      keywords: FREELANCER_KEYWORDS,
+      resultsPerKeyword: FREELANCER_RESULTS_PER_KEYWORD
+    },
+    upwork: {
+      enabled: UPWORK_ENABLED,
+      tokenConfigured: Boolean(UPWORK_ACCESS_TOKEN),
+      keywords: UPWORK_KEYWORDS,
+      resultsPerKeyword: UPWORK_RESULTS_PER_KEYWORD,
+      daysPosted: UPWORK_DAYS_POSTED
+    },
     excludedOlderThanWindow: rawJobs.length - recentRawJobs.length,
     lookbackDays,
     includedSince: cutoffSeconds ? new Date(cutoffSeconds * 1000).toISOString() : null,
@@ -278,6 +418,24 @@ async function getEnrichedJobs({ forceRefresh = false, lookbackDays = DEFAULT_LO
 }
 
 async function fetchAllJobs() {
+  const jobs = [];
+
+  if (FREEHUNTER_ENABLED) {
+    jobs.push(...await fetchFreehunterJobs());
+  }
+
+  if (FREELANCER_ENABLED) {
+    jobs.push(...await fetchFreelancerJobs());
+  }
+
+  if (UPWORK_ENABLED) {
+    jobs.push(...await fetchUpworkJobs());
+  }
+
+  return jobs;
+}
+
+async function fetchFreehunterJobs() {
   const payload = await fetchJson(`${API_BASE}/getAllJobs`, {
     method: 'GET',
     headers: {
@@ -289,7 +447,325 @@ async function fetchAllJobs() {
     throw new Error('Unexpected getAllJobs response shape');
   }
 
-  return payload.result;
+  return payload.result.map((job) => ({
+    ...job,
+    source: 'freehunter'
+  }));
+}
+
+async function fetchFreelancerJobs() {
+  const seen = new Map();
+  const fetchedAtSeconds = Math.floor(Date.now() / 1000);
+  const searches = await mapLimit(FREELANCER_KEYWORDS, 3, async (keyword) => {
+    const url = new URL(FREELANCER_SEARCH_BASE);
+    url.searchParams.set('tag', keyword);
+    url.searchParams.set('languages', 'en');
+    url.searchParams.set('status', 'open');
+    url.searchParams.set('iDisplayStart', '0');
+    url.searchParams.set('iDisplayLength', String(Math.max(1, FREELANCER_RESULTS_PER_KEYWORD)));
+    url.searchParams.set('iSortingCols', '1');
+    url.searchParams.set('iSortCol_0', '6');
+    url.searchParams.set('sSortDir_0', 'desc');
+    url.searchParams.set('format_version', '3');
+
+    try {
+      const payload = await fetchJson(url.toString(), {
+        method: 'GET',
+        headers: {
+          Accept: 'application/json'
+        }
+      });
+      const rows = Array.isArray(payload?.aaData) ? payload.aaData : [];
+      return {
+        keyword,
+        total: Number(payload?.iTotalDisplayRecords || payload?.iTotalRecords || rows.length),
+        rows
+      };
+    } catch (error) {
+      console.warn(`Freelancer search failed for "${keyword}":`, error instanceof Error ? error.message : String(error));
+      return {
+        keyword,
+        total: 0,
+        rows: [],
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
+  });
+
+  for (const search of searches) {
+    for (const row of search.rows) {
+      const projectId = Number(row.project_id || 0);
+      if (!projectId || seen.has(projectId)) continue;
+      seen.set(projectId, {
+        ...row,
+        source: 'freelancer',
+        sourceKeyword: search.keyword,
+        sourceSearchTotal: search.total,
+        createdAtSeconds: fetchedAtSeconds
+      });
+    }
+  }
+
+  return [...seen.values()];
+}
+
+async function fetchUpworkJobs() {
+  if (!UPWORK_ACCESS_TOKEN) {
+    console.warn('Upwork source enabled but UPWORK_ACCESS_TOKEN is not configured.');
+    return [];
+  }
+
+  const seen = new Map();
+  const searches = await mapLimit(UPWORK_KEYWORDS, 2, async (keyword) => {
+    const variables = {
+      filter: {
+        searchExpression_eq: keyword,
+        daysPosted_eq: Math.max(1, UPWORK_DAYS_POSTED),
+        pagination_eq: {
+          first: Math.max(1, UPWORK_RESULTS_PER_KEYWORD)
+        }
+      },
+      sortAttributes: [
+        {
+          field: 'RECENCY'
+        }
+      ]
+    };
+
+    try {
+      const payload = await fetchUpworkGraphql(UPWORK_JOB_SEARCH_QUERY, variables);
+      const result = payload?.data?.marketplaceJobPostingsSearch || payload?.data?.marketplaceJobPostings || null;
+      return {
+        keyword,
+        total: Number(result?.totalCount || result?.total || result?.paging?.total || 0),
+        rows: extractUpworkNodes(result)
+      };
+    } catch (error) {
+      console.warn(`Upwork search failed for "${keyword}":`, error instanceof Error ? error.message : String(error));
+      return {
+        keyword,
+        total: 0,
+        rows: [],
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
+  });
+
+  for (const search of searches) {
+    for (const row of search.rows) {
+      const externalId = upworkExternalId(row);
+      if (!externalId || seen.has(externalId)) continue;
+      seen.set(externalId, {
+        ...row,
+        source: 'upwork',
+        sourceKeyword: search.keyword,
+        sourceSearchTotal: search.total
+      });
+    }
+  }
+
+  return [...seen.values()];
+}
+
+async function fetchUpworkGraphql(query, variables = {}) {
+  const payload = await fetchJson(UPWORK_GRAPHQL_URL, {
+    method: 'POST',
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${UPWORK_ACCESS_TOKEN}`
+    },
+    body: JSON.stringify({ query, variables })
+  });
+
+  if (Array.isArray(payload?.errors) && payload.errors.length) {
+    const message = payload.errors
+      .map((error) => error?.message || JSON.stringify(error))
+      .filter(Boolean)
+      .join('; ');
+    throw new Error(message || 'Upwork GraphQL returned errors');
+  }
+
+  return payload;
+}
+
+function startUpworkOAuth(url, res) {
+  if (!UPWORK_CLIENT_ID) {
+    return sendJson(res, 400, {
+      error: 'missing_upwork_client_id',
+      message: 'Set UPWORK_CLIENT_ID after the Upwork API key is approved.',
+      callbackUrl: UPWORK_REDIRECT_URI,
+      oauth: publicUpworkOAuthConfig()
+    });
+  }
+
+  const redirectUri = url.searchParams.get('redirect_uri') || UPWORK_REDIRECT_URI;
+  const authorizeUrl = new URL(UPWORK_OAUTH_AUTHORIZE_URL);
+  authorizeUrl.searchParams.set('response_type', 'code');
+  authorizeUrl.searchParams.set('client_id', UPWORK_CLIENT_ID);
+  authorizeUrl.searchParams.set('redirect_uri', redirectUri);
+  const state = url.searchParams.get('state') || UPWORK_OAUTH_STATE;
+  if (state) authorizeUrl.searchParams.set('state', state);
+
+  res.writeHead(302, {
+    Location: authorizeUrl.toString(),
+    'Cache-Control': 'no-store'
+  });
+  res.end();
+}
+
+async function handleUpworkCallback(url, res) {
+  const error = url.searchParams.get('error') || '';
+  const errorDescription = url.searchParams.get('error_description') || '';
+  const code = url.searchParams.get('code') || '';
+  const state = url.searchParams.get('state') || '';
+
+  if (error) {
+    return sendHtml(res, 400, renderUpworkCallbackHtml({
+      title: 'Upwork authorization failed',
+      status: 'error',
+      message: [error, errorDescription].filter(Boolean).join(': '),
+      code,
+      state
+    }));
+  }
+
+  if (!code) {
+    return sendHtml(res, 200, renderUpworkCallbackHtml({
+      title: 'Upwork callback ready',
+      status: 'ready',
+      message: 'Use this URL as the Upwork OAuth callback / redirect URI.',
+      callbackUrl: UPWORK_REDIRECT_URI
+    }));
+  }
+
+  if (UPWORK_OAUTH_STATE && state && state !== UPWORK_OAUTH_STATE) {
+    return sendHtml(res, 400, renderUpworkCallbackHtml({
+      title: 'Upwork state mismatch',
+      status: 'error',
+      message: 'The OAuth state did not match UPWORK_OAUTH_STATE. Do not use this authorization code.',
+      code,
+      state
+    }));
+  }
+
+  if (!UPWORK_CLIENT_ID || !UPWORK_CLIENT_SECRET) {
+    return sendHtml(res, 200, renderUpworkCallbackHtml({
+      title: 'Upwork authorization code received',
+      status: 'code_only',
+      message: 'Set UPWORK_CLIENT_ID and UPWORK_CLIENT_SECRET to let the dashboard exchange this code automatically.',
+      callbackUrl: UPWORK_REDIRECT_URI,
+      code,
+      state
+    }));
+  }
+
+  try {
+    const token = await exchangeUpworkAuthorizationCode(code);
+    return sendHtml(res, 200, renderUpworkCallbackHtml({
+      title: 'Upwork token received',
+      status: 'token',
+      message: 'Copy these values into Vercel/local environment variables. Treat them like passwords.',
+      callbackUrl: UPWORK_REDIRECT_URI,
+      code,
+      state,
+      token
+    }));
+  } catch (exchangeError) {
+    return sendHtml(res, 502, renderUpworkCallbackHtml({
+      title: 'Upwork token exchange failed',
+      status: 'error',
+      message: exchangeError instanceof Error ? exchangeError.message : String(exchangeError),
+      callbackUrl: UPWORK_REDIRECT_URI,
+      code,
+      state
+    }));
+  }
+}
+
+async function exchangeUpworkAuthorizationCode(code) {
+  const body = new URLSearchParams({
+    grant_type: 'authorization_code',
+    client_id: UPWORK_CLIENT_ID,
+    client_secret: UPWORK_CLIENT_SECRET,
+    code,
+    redirect_uri: UPWORK_REDIRECT_URI
+  });
+
+  const response = await fetch(UPWORK_OAUTH_TOKEN_URL, {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/x-www-form-urlencoded'
+    },
+    body,
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+  });
+  const text = await response.text();
+
+  if (!response.ok) {
+    throw new Error(`${response.status} ${response.statusText}: ${text.slice(0, 400)}`);
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`Invalid JSON from ${UPWORK_OAUTH_TOKEN_URL}`);
+  }
+}
+
+function renderUpworkCallbackHtml({ title, status, message, callbackUrl = UPWORK_REDIRECT_URI, code = '', state = '', token = null } = {}) {
+  const envLines = token ? [
+    token.access_token ? `UPWORK_ACCESS_TOKEN=${token.access_token}` : '',
+    token.refresh_token ? `UPWORK_REFRESH_TOKEN=${token.refresh_token}` : '',
+    token.expires_in ? `# Access token expires in ${token.expires_in} seconds` : '',
+    'UPWORK_ENABLED=1'
+  ].filter(Boolean).join('\n') : '';
+  const codeBlock = code ? `UPWORK_AUTHORIZATION_CODE=${code}` : '';
+  const stateLine = state ? `<p><strong>State:</strong> <code>${escapeHtmlAttribute(state)}</code></p>` : '';
+
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>${escapeHtmlAttribute(title || 'Upwork OAuth')}</title>
+    <style>
+      body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; background: #f7f8f4; color: #1f2a24; }
+      main { max-width: 760px; margin: 10vh auto; padding: 32px; background: #fff; border: 1px solid #dfe5dc; border-radius: 8px; }
+      h1 { margin: 0 0 12px; font-size: 28px; }
+      p { line-height: 1.55; }
+      code, pre { background: #f1f4ef; border: 1px solid #dfe5dc; border-radius: 6px; }
+      code { padding: 2px 6px; }
+      pre { padding: 16px; overflow: auto; white-space: pre-wrap; word-break: break-word; }
+      .status { display: inline-block; padding: 4px 10px; border-radius: 999px; background: #e7f5e9; color: #137333; font-size: 13px; }
+      .error { background: #fdeceb; color: #b42318; }
+      .muted { color: #66736b; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <span class="status ${status === 'error' ? 'error' : ''}">${escapeHtmlAttribute(status || 'ready')}</span>
+      <h1>${escapeHtmlAttribute(title || 'Upwork OAuth')}</h1>
+      <p>${escapeHtmlAttribute(message || '')}</p>
+      <p><strong>Callback URL:</strong> <code>${escapeHtmlAttribute(callbackUrl)}</code></p>
+      ${stateLine}
+      ${codeBlock ? `<h2>Authorization code</h2><pre>${escapeHtmlAttribute(codeBlock)}</pre>` : ''}
+      ${envLines ? `<h2>Environment variables</h2><pre>${escapeHtmlAttribute(envLines)}</pre>` : ''}
+      <p class="muted">Keep authorization codes, access tokens, refresh tokens, client IDs, and client secrets private.</p>
+    </main>
+  </body>
+</html>`;
+}
+
+function escapeHtmlAttribute(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 async function fetchClientEmail(clientId) {
@@ -354,6 +830,18 @@ async function fetchJson(url, options) {
 }
 
 function normalizeJob(job, emailInfo = {}) {
+  if (job.source === 'freelancer') {
+    return normalizeFreelancerJob(job);
+  }
+
+  if (job.source === 'upwork') {
+    return normalizeUpworkJob(job);
+  }
+
+  return normalizeFreehunterJob(job, emailInfo);
+}
+
+function normalizeFreehunterJob(job, emailInfo = {}) {
   const createdAtSeconds = getJobCreatedAtSeconds(job);
 
   const latestModifySeconds = timestampSeconds(job.lastest_modify_time);
@@ -393,7 +881,135 @@ function normalizeJob(job, emailInfo = {}) {
     applicationCount: applications,
     inviteCount: invitations,
     nature: stringValue(job.nature),
+    source: 'freehunter',
+    sourceLabel: 'FreeHunter',
+    sourceExternalId: Number(job.id || 0),
+    sourceUrl: '',
     raw: job
+  };
+
+  return {
+    ...normalized,
+    aiAnalysis: analyzeJob(normalized)
+  };
+}
+
+function normalizeFreelancerJob(project) {
+  const projectId = Number(project.project_id || 0);
+  const createdAtSeconds = Number(project.createdAtSeconds || 0) || Math.floor(Date.now() / 1000);
+  const skills = Array.isArray(project.skills_info)
+    ? project.skills_info.map((skill) => cleanFreelancerText(skill?.name)).filter(Boolean)
+    : [];
+  const seoUrl = stringValue(project.seo_url);
+  const sourceUrl = seoUrl ? `${trimTrailingSlash(FREELANCER_PROJECT_BASE)}${seoUrl}` : trimTrailingSlash(FREELANCER_PROJECT_BASE);
+  const sourceKeyword = stringValue(project.sourceKeyword);
+  const budget = cleanFreelancerText(project.budget_range || [project.minbudget, project.maxbudget].filter(Boolean).join(' - '));
+  const detail = cleanFreelancerText(project.project_desc);
+
+  const normalized = {
+    id: FREELANCER_ID_OFFSET + projectId,
+    title: cleanFreelancerText(project.project_name) || '(Untitled Freelancer job)',
+    detail,
+    hideDetail: [
+      `Freelancer project ID: ${projectId}`,
+      sourceKeyword ? `Matched keyword: ${sourceKeyword}` : '',
+      project.sourceSearchTotal ? `Keyword open-result count: ${project.sourceSearchTotal}` : '',
+      sourceUrl ? `Project URL: ${sourceUrl}` : ''
+    ].filter(Boolean).join('\n'),
+    clientId: null,
+    clientName: 'Freelancer client',
+    clientEmail: '',
+    emailStatus: 'missing',
+    emailError: 'Use the Freelancer project link to bid/message.',
+    categoryId: null,
+    categoryName: freelancerCategoryFromSkills(skills),
+    catalogId: null,
+    skills,
+    budget,
+    budgetType: project.is_contest ? 'contest' : 'fixed',
+    status: project.is_contest ? 'contest_open' : 'open',
+    directApply: Boolean(sourceUrl),
+    duration: cleanFreelancerText(project.time_left),
+    location: 'Remote / Freelancer.com',
+    region: null,
+    district: null,
+    posterLocation: '',
+    createdAtText: cleanFreelancerText(project.time_left || 'Freelancer newest search result'),
+    createdAtSeconds,
+    createdAtIso: new Date(createdAtSeconds * 1000).toISOString(),
+    latestModifySeconds: createdAtSeconds,
+    latestModifyIso: new Date(createdAtSeconds * 1000).toISOString(),
+    boostStatus: Boolean(project.featured || project.urgent || project.highlight),
+    applicationCount: Number(project.bid_count || 0) || 0,
+    inviteCount: 0,
+    nature: project.is_contest ? 'contest' : 'project',
+    source: 'freelancer',
+    sourceLabel: 'Freelancer',
+    sourceExternalId: projectId,
+    sourceKeyword,
+    sourceUrl,
+    raw: project
+  };
+
+  return {
+    ...normalized,
+    aiAnalysis: analyzeJob(normalized)
+  };
+}
+
+function normalizeUpworkJob(posting) {
+  const externalId = upworkExternalId(posting);
+  const createdAtSeconds = upworkJobCreatedAtSeconds(posting) || Math.floor(Date.now() / 1000);
+  const skills = extractUpworkSkills(posting);
+  const sourceUrl = buildUpworkJobUrl(posting);
+  const sourceKeyword = stringValue(posting.sourceKeyword);
+  const budget = buildUpworkBudget(posting);
+  const clientCountry = stringValue(posting.client?.location?.country || posting.clientCountry);
+  const categoryName = upworkCategoryFromJob(posting, skills);
+
+  const normalized = {
+    id: UPWORK_ID_OFFSET + upworkJobIdNumber(externalId),
+    title: cleanFreelancerText(posting.title) || '(Untitled Upwork job)',
+    detail: cleanFreelancerText(posting.description || posting.summary),
+    hideDetail: [
+      `Upwork job ID: ${externalId}`,
+      sourceKeyword ? `Matched keyword: ${sourceKeyword}` : '',
+      posting.sourceSearchTotal ? `Keyword open-result count: ${posting.sourceSearchTotal}` : '',
+      sourceUrl ? `Job URL: ${sourceUrl}` : ''
+    ].filter(Boolean).join('\n'),
+    clientId: null,
+    clientName: 'Upwork client',
+    clientEmail: '',
+    emailStatus: 'missing',
+    emailError: 'Use the Upwork job link to bid/message.',
+    categoryId: null,
+    categoryName,
+    catalogId: null,
+    skills,
+    budget,
+    budgetType: cleanFreelancerText(posting.jobType || posting.type || posting.engagement || ''),
+    status: 'open',
+    directApply: Boolean(sourceUrl),
+    duration: cleanFreelancerText(posting.duration || posting.engagement || posting.workload),
+    location: clientCountry ? `Remote / Upwork / ${clientCountry}` : 'Remote / Upwork',
+    region: null,
+    district: null,
+    posterLocation: clientCountry,
+    createdAtText: 'Upwork API result',
+    createdAtSeconds,
+    createdAtIso: new Date(createdAtSeconds * 1000).toISOString(),
+    latestModifySeconds: createdAtSeconds,
+    latestModifyIso: new Date(createdAtSeconds * 1000).toISOString(),
+    boostStatus: false,
+    applicationCount: Number(posting.proposalsCount || posting.applicantsCount || 0) || 0,
+    inviteCount: 0,
+    nature: 'project',
+    source: 'upwork',
+    sourceLabel: 'Upwork',
+    sourceExternalId: externalId,
+    sourceKeyword,
+    sourceUrl,
+    raw: posting
   };
 
   return {
@@ -449,18 +1065,33 @@ function analyzeJob(job) {
     signals.push('可直接申請');
   }
 
+  if (job.source === 'freelancer' || job.source === 'upwork') {
+    score += 5;
+    signals.push(`${job.sourceLabel || 'Freelance marketplace'} 英文市場 job，可用站內 bid / proposal 跟進`);
+  }
+
   const matchedAreas = [];
   addAreaScore({
     area: 'development',
     label: '開發 / 網站 / App',
-    keywords: ['網頁開發', '手機應用程式開發', '程式', '網站', 'web', 'app', 'api', 'ui設計', 'ux設計', 'figma', 'mvp'],
+    keywords: [
+      '網頁開發', '手機應用程式開發', '程式', '網站', 'web', 'website', 'website design', 'web design',
+      'web development', 'landing page', 'portfolio site', 'business website', 'wordpress', 'shopify',
+      'woocommerce', 'wix', 'squarespace', 'html', 'css', 'javascript', 'react', 'next.js', 'app', 'api',
+      'ui設計', 'ux設計', 'figma', 'mvp'
+    ],
     points: 18,
     task: '整理需求、做 wireframe / prototype、寫網站或功能原型、協助部署'
   });
   addAreaScore({
     area: 'design',
     label: '設計 / 排版 / 插圖',
-    keywords: ['logo', '海報', '傳單', '橫額', '排版', '卡片設計', '圖卡', '插圖', '數碼插畫', '產品包裝', '小冊子', 'banner', 'poster', 'canva', 'kv design'],
+    keywords: [
+      'logo', 'logo design', 'graphic design', 'branding', 'brand identity', 'vector', 'illustrator',
+      'photoshop', 'figma', 'adobe xd', 'ui', 'ux', 'social media post', 'business card', '海報',
+      '傳單', '橫額', '排版', '卡片設計', '圖卡', '插圖', '數碼插畫', '產品包裝', '小冊子', 'banner',
+      'poster', 'flyer', 'canva', 'kv design'
+    ],
     points: 15,
     task: '出設計方向、初稿、不同尺寸版本、排版同輸出檔案'
   });
@@ -512,6 +1143,77 @@ function analyzeJob(job) {
     humanNeeds.push('如果仍想接，需要你本人或合作人處理現場/真人部分');
   }
 
+  const websiteFocusMatches = keywordMatches(text, [
+    'website',
+    'website design',
+    'web design',
+    'landing page',
+    'wordpress',
+    'shopify',
+    'woocommerce',
+    'wix',
+    'squarespace',
+    'portfolio website',
+    'business website',
+    'e-commerce',
+    'ecommerce'
+  ]);
+  if (websiteFocusMatches.length) {
+    score += Math.min(16, 8 + websiteFocusMatches.length * 2);
+    signals.push(`符合網站主攻方向：${websiteFocusMatches.slice(0, 4).join('、')}`);
+  }
+
+  const designFocusMatches = keywordMatches(text, [
+    'logo design',
+    'graphic design',
+    'branding',
+    'brand identity',
+    'social media post',
+    'poster',
+    'flyer',
+    'business card',
+    'banner',
+    'figma',
+    'photoshop',
+    'illustrator'
+  ]);
+  if (designFocusMatches.length) {
+    score += Math.min(12, 6 + designFocusMatches.length * 2);
+    signals.push(`符合設計主攻方向：${designFocusMatches.slice(0, 4).join('、')}`);
+  }
+
+  const lowFitFreelancerMatches = keywordMatches(text, [
+    'commission-based',
+    'commission based',
+    'sales rep',
+    'business development',
+    'lead generation',
+    'growth manager',
+    'brand growth',
+    'pr & brand',
+    'campaign manager',
+    'marketing manager',
+    'email marketing',
+    'content strategy',
+    'email marketing manager',
+    'virtual assistant',
+    'data entry',
+    'customer support',
+    'pre-employment',
+    'certificate verification',
+    'photography',
+    'local only'
+  ]);
+  if (lowFitFreelancerMatches.length) {
+    score -= Math.min(34, 16 + lowFitFreelancerMatches.length * 5);
+    risks.push(`似銷售/文書/線下驗證而非網站交付：${lowFitFreelancerMatches.slice(0, 4).join('、')}`);
+  }
+
+  if ((job.source === 'freelancer' || job.source === 'upwork') && hasAny(text, ['manager', 'specialist', 'representative']) && !hasAny(text, ['website build', 'website development', 'web development', 'website design', 'logo design', 'graphic design', 'landing page'])) {
+    score -= 18;
+    risks.push('似長期角色/營銷職位，多過一次性網站或設計交付');
+  }
+
   const vagueMatches = keywordMatches(text, ['可協商', '詳談', '所有job', '一切工作', '指定電郵', '報價', 'quote']);
   if (vagueMatches.length && job.detail.length < 280) {
     score -= 8;
@@ -559,9 +1261,14 @@ function analyzeJob(job) {
     risks.push('預算偏細，要避免範圍失控');
   }
 
-  if (hasAny(text, ['mvp', '15-20', '十三個網站', '13個網站', '平台', 'app']) && matchedAreas.includes('development')) {
+  if (hasAny(text, ['mvp', '15-20', '十三個網站', '13個網站', '平台', 'mobile app', 'ios app', 'android app', 'app']) && matchedAreas.includes('development')) {
     score -= 7;
     risks.push('開發範圍可能較大，要拆 MVP / phase 報價');
+  }
+
+  if ((job.source === 'freelancer' || job.source === 'upwork') && !websiteFocusMatches.length && !designFocusMatches.length) {
+    score -= 15;
+    risks.push(`${job.sourceLabel || 'Marketplace'} keyword 命中但唔係明顯網站/設計 job，要低優先處理`);
   }
 
   if (!aiCanDo.length) {
@@ -577,17 +1284,7 @@ function analyzeJob(job) {
   const pricingHint = buildPricingHint(job, status, matchedAreas);
   const quoteRecommendation = buildQuoteRecommendation(job, status, matchedAreas, missingInfo, risks);
   const executionPlan = buildExecutionPlan(job, matchedAreas, status);
-  const emailDraft = buildEmailDraft(job, {
-    status,
-    missingInfo,
-    aiCanDo,
-    pricingHint,
-    nextStep,
-    quoteRecommendation,
-    executionPlan
-  });
-
-  return {
+  const analysis = {
     status,
     score,
     confidence: score >= 75 || score <= 25 ? 'high' : 'medium',
@@ -600,7 +1297,19 @@ function analyzeJob(job) {
     recommendedNextStep: nextStep,
     pricingHint,
     quoteRecommendation,
-    executionPlan,
+    executionPlan
+  };
+  const difficulty = deriveDifficultyScores(job, analysis);
+  const emailDraft = buildEmailDraft(job, {
+    ...analysis,
+    ...difficulty,
+    emailDraftSource: 'rule_fallback',
+    emailDraftSourceDetail: 'Local fallback draft generated from job detail and analysis'
+  });
+
+  return {
+    ...analysis,
+    ...difficulty,
     emailDraft
   };
 
@@ -613,6 +1322,67 @@ function analyzeJob(job) {
     signals.push(`${label} 有明顯 AI 槓桿：${matches.slice(0, 4).join('、')}`);
     aiCanDo.push(task);
   }
+}
+
+function deriveDifficultyScores(job, analysis = {}) {
+  const missingCount = Array.isArray(analysis.missingInfo) ? analysis.missingInfo.length : 0;
+  const riskCount = Array.isArray(analysis.risks) ? analysis.risks.length : 0;
+  const text = normalizeText([
+    job.title,
+    job.detail,
+    job.hideDetail,
+    job.categoryName,
+    job.duration,
+    ...(job.skills || [])
+  ].join('\n'));
+  const statusBonus = {
+    easy: 22,
+    needs_info: 4,
+    hard: -16,
+    not_fit: -34
+  }[analysis.status] || 0;
+  const urgencyPenalty = hasAny(text, ['急', '即日', '即時', '三日內', 'within_three_days']) ? 8 : 0;
+  const physicalPenalty = hasAny(text, ['現場', '上門', '拍攝', '出鏡', '直播', '老師', '司儀']) ? 12 : 0;
+  const clarityPenalty = Math.min(28, missingCount * 8);
+  const riskPenalty = Math.min(24, riskCount * 7);
+  const scoreComponent = Math.round(Number(analysis.score || 0) * 0.42);
+  const easyScore = clamp(42 + scoreComponent + statusBonus - clarityPenalty - riskPenalty - urgencyPenalty - physicalPenalty, 0, 100);
+  const difficultyScore = clamp(100 - easyScore, 0, 100);
+
+  return {
+    easyScore,
+    difficultyScore,
+    difficultyLabel: easyScore >= 76 ? 'easy' : easyScore >= 58 ? 'medium' : easyScore >= 36 ? 'hard' : 'very_hard'
+  };
+}
+
+function normalizeAnalysisForDisplay(job, analysis = {}) {
+  const normalized = {
+    ...analysis,
+    score: Number.isFinite(Number(analysis.score)) ? clamp(Math.round(Number(analysis.score)), 0, 100) : 0,
+    status: ['easy', 'needs_info', 'hard', 'not_fit'].includes(analysis.status) ? analysis.status : 'not_fit',
+    missingInfo: Array.isArray(analysis.missingInfo) ? analysis.missingInfo : [],
+    risks: Array.isArray(analysis.risks) ? analysis.risks : [],
+    aiCanDo: Array.isArray(analysis.aiCanDo) ? analysis.aiCanDo : [],
+    humanNeeds: Array.isArray(analysis.humanNeeds) ? analysis.humanNeeds : [],
+    executionPlan: Array.isArray(analysis.executionPlan) ? analysis.executionPlan : [],
+    quoteRecommendation: normalizeQuoteRecommendation(analysis.quoteRecommendation, {})
+  };
+  const derived = deriveDifficultyScores(job, normalized);
+  const draft = normalized.emailDraft?.body
+    ? normalizeEmailDraft(normalized.emailDraft, normalized.status, {}, normalized.emailDraft.source || 'rule_fallback')
+    : buildEmailDraft(job, {
+        ...normalized,
+        ...derived,
+        emailDraftSource: 'rule_fallback',
+        emailDraftSourceDetail: 'Local fallback draft generated from job detail and analysis'
+      });
+
+  return {
+    ...normalized,
+    ...derived,
+    emailDraft: draft
+  };
 }
 
 function chooseAiStatus({ score, forcedStatus, missingInfo, risks, physicalMatches, matchedAreas }) {
@@ -783,8 +1553,14 @@ function buildEmailDraft(job, analysis) {
     return {
       type: 'skip',
       subject: '',
-      body: ''
+      body: '',
+      source: analysis.emailDraftSource || 'missing',
+      sourceDetail: 'No client-facing draft because this job is not a good AI fit.'
     };
+  }
+
+  if (job.source === 'freelancer' || job.source === 'upwork') {
+    return buildFreelancerProposalDraft(job, analysis);
   }
 
   const clientName = cleanupName(job.clientName);
@@ -793,25 +1569,31 @@ function buildEmailDraft(job, analysis) {
   const questions = buildEmailQuestions(analysis.missingInfo, job);
   const quote = analysis.quoteRecommendation || {};
   const executionPlan = Array.isArray(analysis.executionPlan) ? analysis.executionPlan : [];
-  const subjectPrefix = analysis.status === 'easy' ? '關於' : '想了解多少少';
+  const understanding = summarizeJobUnderstanding(job);
+  const deliveryTime = estimateDeliveryTime(job, analysis);
+  const revisionText = estimateRevisionText(job, analysis);
+  const subjectPrefix = quote.canQuote ? '關於' : '想了解多少少';
   const subject = `${subjectPrefix}「${job.title}」嘅合作`;
   const canQuote = Boolean(quote.canQuote);
   const quoteBlock = canQuote
     ? [
-        `按目前資料，我初步報價會建議 ${quote.range}。呢個報價已預留少量調整空間，實際金額可以因應最終交付格式、修改次數同時間表再微調。`,
+        `按目前資料，我會先建議 ${quote.range} 作初步報價。呢個 range 已預留少量議價空間，實際金額可以按 final scope、素材完整度同交付格式再微調。`,
+        `時間方面，資料齊同方向確認後，初步估計 ${deliveryTime} 可以交第一版；${revisionText}。`,
         '',
-        '大概做法會係：',
+        '我會大概咁處理：',
         ...executionPlan.slice(0, 4).map((step, index) => `${index + 1}. ${step}`),
         '',
-        '如果方向合適，我可以再按你哋提供嘅素材同 final scope，整理一個更正式嘅報價同交付時間。'
+        '如果方向合適，想問你哋是否方便再確認 scope、素材同時間表？我可以之後整理一個較正式嘅報價同交付安排。'
       ]
     : [
-        quote.quoteLine || '我可以協助處理呢個項目，不過想先問清楚範圍，避免報價同實際需要有落差。',
+        '我有興趣幫手處理呢個項目。不過而家資料仲未算完整，我想先問清楚幾點，避免報價同實際需要有落差。',
         '',
-        '想先確認幾點，方便我俾到準確報價同時間：',
+        '想先確認：',
         ...questions.map((question, index) => `${index + 1}. ${question}`),
         '',
-        '資料齊之後，我可以再整理一個清楚報價、做法同預計交付時間俾你哋。'
+        quote.range
+          ? `以現有資料粗略睇，價錢方向可以先參考 ${quote.range}，但要等上面細節確認後先可以定實。`
+          : '資料齊之後，我可以再整理一個清楚報價、做法同預計交付時間俾你哋。'
       ];
 
   return {
@@ -820,19 +1602,111 @@ function buildEmailDraft(job, analysis) {
     body: [
       greeting,
       '',
-      `我見到你哋喺 Freehunter 發佈「${job.title}」，我對呢個項目有興趣。睇完內容後，我初步可以協助${deliverable}。`,
+      `我見到你哋喺 Freehunter 發佈「${job.title}」，理解係想${understanding}。睇完內容後，我初步可以協助${deliverable}。`,
       '',
       ...quoteBlock,
       '',
       '謝謝，',
       OUTREACH_OWNER_NAME,
       OUTREACH_OWNER_PHONE
-    ].join('\n')
+    ].join('\n'),
+    source: analysis.emailDraftSource || 'rule_fallback',
+    sourceDetail: analysis.emailDraftSourceDetail || 'Local fallback draft generated from job detail and analysis.'
   };
+}
+
+function buildFreelancerProposalDraft(job, analysis) {
+  const quote = analysis.quoteRecommendation || {};
+  const questions = buildFreelancerQuestions(analysis.missingInfo, job);
+  const executionPlan = Array.isArray(analysis.executionPlan) ? analysis.executionPlan : [];
+  const deliveryTime = estimateMarketplaceDeliveryTime(job, analysis);
+  const quoteLine = quote.canQuote && quote.range
+    ? `My initial estimate is ${quote.range.replace('HKD', 'around HKD')}, depending on the final scope and assets.`
+    : quote.range
+      ? `As a rough direction, this looks like ${quote.range.replace('HKD', 'around HKD')}, but I would confirm the final quote after the details below.`
+      : 'I can confirm a fixed quote once the exact scope, assets, and timeline are clear.';
+  const intro = summarizeMarketplaceUnderstanding(job);
+
+  const body = [
+    'Hi,',
+    '',
+    `I can help with "${job.title}". From your brief, I understand you need ${intro}.`,
+    '',
+    'I can handle the first practical version quickly: clarify the structure, prepare the design/build direction, create the main pages or design assets, and keep the handoff clean so you can review or update it later.',
+    '',
+    quoteLine,
+    `Estimated first delivery: ${deliveryTime} after the scope and required assets are confirmed.`,
+    '',
+    executionPlan.length ? 'My suggested workflow:' : '',
+    ...executionPlan.slice(0, 4).map((step, index) => `${index + 1}. ${step}`),
+    '',
+    questions.length ? 'A few quick questions before I start:' : '',
+    ...questions.map((question, index) => `${index + 1}. ${question}`),
+    '',
+    'If this sounds good, I can start with a focused first milestone and keep the work easy to review.',
+    '',
+    'Best,',
+    OUTREACH_OWNER_NAME
+  ].filter((line, index, lines) => line || lines[index - 1]).join('\n');
+
+  return {
+    type: quote.canQuote ? 'apply' : 'clarify',
+    subject: `Proposal for ${job.title}`,
+    body,
+    source: analysis.emailDraftSource || 'rule_fallback',
+    sourceDetail: analysis.emailDraftSourceDetail || `Local ${job.sourceLabel || 'marketplace'} proposal draft generated from project detail and analysis.`
+  };
+}
+
+function buildFreelancerQuestions(missingInfo, job) {
+  const questions = [];
+  const text = normalizeText([job.title, job.detail, job.categoryName, ...(job.skills || [])].join(' '));
+
+  if (missingInfo.some((item) => item.includes('範圍') || item.includes('數量') || item.includes('尺寸') || item.includes('格式'))) {
+    questions.push('Which pages, screens, or final file formats do you need in the first milestone?');
+  }
+  if (missingInfo.some((item) => item.includes('deadline') || item.includes('時間'))) {
+    questions.push('What is your preferred deadline for the first draft and final delivery?');
+  }
+  if (hasAny(text, ['website', 'web design', 'wordpress', 'shopify', 'landing page', 'ecommerce'])) {
+    questions.push('Do you already have copy, brand assets, hosting/CMS access, or reference websites?');
+  }
+  if (hasAny(text, ['logo', 'graphic design', 'branding', 'poster', 'banner', 'figma', 'photoshop'])) {
+    questions.push('Do you have brand guidelines, reference styles, dimensions, and required source-file formats?');
+  }
+
+  return unique(questions).slice(0, 5);
+}
+
+function summarizeMarketplaceUnderstanding(job) {
+  const text = normalizeText([job.title, job.detail, job.categoryName, ...(job.skills || [])].join(' '));
+  if (hasAny(text, ['website', 'web design', 'web development', 'wordpress', 'shopify', 'landing page', 'ecommerce'])) {
+    return 'a clear, practical website or landing page with the right structure, content flow, and responsive implementation';
+  }
+  if (hasAny(text, ['logo', 'graphic design', 'branding', 'brand identity', 'poster', 'banner', 'figma', 'photoshop'])) {
+    return 'clean design assets with a strong visual direction and files prepared for review or handoff';
+  }
+  if (hasAny(text, ['seo', 'copywriting', 'blog', 'content', 'marketing'])) {
+    return 'well-structured content or marketing assets that can be reviewed quickly and used in production';
+  }
+  if (hasAny(text, ['prototype', 'mvp', 'app', 'dashboard'])) {
+    return 'a focused first version or prototype that proves the main workflow before expanding the scope';
+  }
+  return 'a focused first deliverable that turns the brief into something concrete and easy to review';
+}
+
+function estimateMarketplaceDeliveryTime(job, analysis = {}) {
+  const text = normalizeText([job.title, job.detail, job.categoryName, job.duration, ...(job.skills || [])].join(' '));
+  if (Number(analysis.easyScore || 0) >= 75) return '2-4 business days';
+  if (hasAny(text, ['logo', 'banner', 'poster', 'business card', 'social media post'])) return '2-5 business days';
+  if (hasAny(text, ['landing page', 'wordpress', 'shopify', 'website', 'web development'])) return '4-10 business days';
+  if (hasAny(text, ['mvp', 'dashboard', 'app', 'api'])) return '1-3 weeks, depending on scope';
+  return '3-7 business days';
 }
 
 function buildEmailQuestions(missingInfo, job) {
   const questions = [];
+  const text = normalizeText([job.title, job.detail, job.hideDetail, job.categoryName, ...(job.skills || [])].join(' '));
 
   if (missingInfo.some((item) => item.includes('範圍') || item.includes('數量') || item.includes('尺寸') || item.includes('格式'))) {
     questions.push('今次最終需要交付咩檔案/格式？數量同尺寸大概係點？');
@@ -842,18 +1716,51 @@ function buildEmailQuestions(missingInfo, job) {
     questions.push('你哋期望初稿同 final 版本分別幾時完成？');
   }
 
-  if (job.categoryName.includes('平面') || hasAny(normalizeText(job.skills.join(' ')), ['設計', '插圖', '排版', 'logo'])) {
+  if (job.categoryName.includes('平面') || hasAny(text, ['設計', '插圖', '排版', 'logo', 'poster', 'banner'])) {
     questions.push('有冇品牌 guideline、參考風格、文字內容或現有素材可以先睇？');
-  } else if (job.categoryName.includes('程式') || hasAny(normalizeText(job.skills.join(' ')), ['網頁', 'app', 'ui', 'ux'])) {
+  } else if (job.categoryName.includes('程式') || hasAny(text, ['網頁', '網站', 'app', 'ui', 'ux', 'web'])) {
     questions.push('有冇現有網站/設計稿/功能清單？邊啲功能係第一版一定要有？');
-  } else if (job.categoryName.includes('營銷') || hasAny(normalizeText(job.skills.join(' ')), ['seo', '內容', '社交'])) {
+  } else if (job.categoryName.includes('營銷') || hasAny(text, ['seo', '內容', '社交', '文案', 'marketing'])) {
     questions.push('目標客群、語氣風格同需要管理嘅平台係邊幾個？');
-  } else if (job.categoryName.includes('影片') || hasAny(normalizeText(job.skills.join(' ')), ['影片', '字幕', '配音'])) {
+  } else if (job.categoryName.includes('影片') || hasAny(text, ['影片', '字幕', '配音', '剪接', 'reels', 'shorts'])) {
     questions.push('原片/文字稿/參考影片有冇？需要輸出咩比例同格式？');
   }
 
+  if (!hasAny(text, ['修改', 'revision', '改稿'])) {
+    questions.push('修改次數同 approval 流程方面，你哋有冇既定要求？');
+  }
+
   questions.push('預算係想按整個項目計，定係可以按階段/每件交付計？');
-  return unique(questions).slice(0, 4);
+  if (questions.length < 3) {
+    questions.unshift('現時最優先想解決嘅部分係邊一項？');
+  }
+  return unique(questions).slice(0, 5);
+}
+
+function summarizeJobUnderstanding(job) {
+  const text = normalizeText([job.title, job.detail, job.categoryName, ...(job.skills || [])].join(' '));
+  if (hasAny(text, ['網頁', '網站', 'web', 'app', 'ui', 'ux', 'mvp'])) return '做一個清楚可用嘅網站 / 功能原型，並處理主要頁面同流程';
+  if (hasAny(text, ['logo', '海報', 'banner', '插圖', '排版', '包裝', '設計'])) return '完成設計方向、排版同輸出檔案';
+  if (hasAny(text, ['seo', '文章', '文案', '內容', '社交', '營銷', 'marketing'])) return '整理內容方向、文案同可直接使用嘅素材';
+  if (hasAny(text, ['影片', '剪接', '字幕', '配音', 'reels', 'shorts'])) return '處理影片 / 聲音素材，整理成合適嘅交付格式';
+  return '將項目範圍整理清楚，做出可交付嘅第一版成果';
+}
+
+function estimateDeliveryTime(job, analysis = {}) {
+  const text = normalizeText([job.title, job.detail, job.duration, job.categoryName, ...(job.skills || [])].join(' '));
+  if (hasAny(text, ['三日內', 'within_three_days', '即日', '即時'])) return '2-3 個工作天內';
+  if (hasAny(text, ['網頁', '網站', 'app', 'mvp', '平台'])) return Number(analysis.easyScore || 0) >= 72 ? '7-14 個工作天' : '2-4 星期，視乎功能範圍';
+  if (hasAny(text, ['logo', '海報', 'banner', '設計', '插圖', '排版'])) return '3-7 個工作天';
+  if (hasAny(text, ['影片', '剪接', '字幕', '配音'])) return '4-10 個工作天';
+  if (hasAny(text, ['文章', '文案', 'seo', '社交', '內容'])) return '2-5 個工作天';
+  return '約 3-10 個工作天';
+}
+
+function estimateRevisionText(job, analysis = {}) {
+  const text = normalizeText([job.title, job.detail, job.categoryName, ...(job.skills || [])].join(' '));
+  if (hasAny(text, ['網頁', '網站', 'app', 'mvp', '平台'])) return '包括一輪主要修改及一輪細節調整';
+  if (Number(analysis.easyScore || 0) >= 70) return '包括 2 次合理修改';
+  return '包括 1-2 次合理修改，額外大改可再另議';
 }
 
 function summarizeDeliverable(aiCanDo, job) {
@@ -923,6 +1830,7 @@ function clamp(value, min, max) {
 
 function getJobCreatedAtSeconds(job) {
   return (
+    Number(job.createdAtSeconds || 0) ||
     timestampSeconds(job.created_at_datetime) ||
     timestampSeconds(job.createdAt) ||
     Number(job.timestamp_number || job.timestampNumber || 0) ||
@@ -949,7 +1857,9 @@ function timestampSeconds(value) {
   if (typeof value === 'number') return value;
   if (typeof value === 'string') {
     const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : 0;
+    if (Number.isFinite(parsed)) return parsed;
+    const dateMs = Date.parse(value);
+    return Number.isFinite(dateMs) ? Math.floor(dateMs / 1000) : 0;
   }
   if (typeof value === 'object' && Number.isFinite(Number(value._seconds))) {
     return Number(value._seconds);
@@ -960,6 +1870,191 @@ function timestampSeconds(value) {
 function stringValue(value) {
   if (value === null || value === undefined) return '';
   return String(value);
+}
+
+function cleanFreelancerText(value) {
+  return decodeHtmlEntities(String(value || '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/p>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/\r/g, '')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim());
+}
+
+function extractUpworkNodes(result) {
+  if (!result) return [];
+  if (Array.isArray(result.edges)) {
+    return result.edges.map((edge) => edge?.node || edge).filter(Boolean);
+  }
+  if (Array.isArray(result.nodes)) return result.nodes.filter(Boolean);
+  if (Array.isArray(result.items)) return result.items.filter(Boolean);
+  if (Array.isArray(result.results)) return result.results.filter(Boolean);
+  if (Array.isArray(result.postings)) return result.postings.filter(Boolean);
+  return [];
+}
+
+function upworkExternalId(posting = {}) {
+  return stringValue(
+    posting.ciphertext ||
+    posting.id ||
+    posting.uid ||
+    posting.jobId ||
+    posting.key
+  );
+}
+
+function upworkJobIdNumber(externalId) {
+  const hash = createHash('sha1').update(String(externalId || '')).digest('hex').slice(0, 10);
+  return Number.parseInt(hash, 16) || 0;
+}
+
+function upworkJobCreatedAtSeconds(posting = {}) {
+  return (
+    timestampSeconds(posting.publishedDateTime) ||
+    timestampSeconds(posting.createdDateTime) ||
+    timestampSeconds(posting.publishedDate) ||
+    timestampSeconds(posting.createdDate) ||
+    timestampSeconds(posting.createdAt)
+  );
+}
+
+function extractUpworkSkills(posting = {}) {
+  const rawSkills = Array.isArray(posting.skills)
+    ? posting.skills
+    : Array.isArray(posting.skillsInfo)
+      ? posting.skillsInfo
+      : [];
+  return rawSkills
+    .map((skill) => cleanFreelancerText(skill?.prettyName || skill?.prefLabel || skill?.name || skill))
+    .filter(Boolean)
+    .slice(0, 20);
+}
+
+function buildUpworkBudget(posting = {}) {
+  const fixed = formatUpworkMoney(posting.amount || posting.fixedBudgetAmount || posting.fixedPriceAmount || posting.budget);
+  const hourlyMin = formatUpworkMoney(posting.hourlyBudgetMin || posting.hourlyMin || posting.minHourlyRate);
+  const hourlyMax = formatUpworkMoney(posting.hourlyBudgetMax || posting.hourlyMax || posting.maxHourlyRate);
+  if (fixed) return fixed;
+  if (hourlyMin && hourlyMax && hourlyMin !== hourlyMax) return `${hourlyMin} - ${hourlyMax}/hr`;
+  if (hourlyMin || hourlyMax) return `${hourlyMin || hourlyMax}/hr`;
+  return cleanFreelancerText(posting.budgetText || posting.amountText || posting.hourlyBudgetText);
+}
+
+function formatUpworkMoney(value) {
+  if (value === null || value === undefined || value === '') return '';
+  if (typeof value === 'number') return `USD ${value.toLocaleString('en-US')}`;
+  if (typeof value === 'string') return cleanFreelancerText(value);
+  const display = stringValue(value.displayValue || value.display);
+  if (display) return cleanFreelancerText(display);
+  const raw = value.rawValue ?? value.amount ?? value.value;
+  const currency = stringValue(value.currency || value.currencyCode || 'USD') || 'USD';
+  if (raw === null || raw === undefined || raw === '') return '';
+  const amount = Number(raw);
+  return Number.isFinite(amount) ? `${currency} ${amount.toLocaleString('en-US')}` : `${currency} ${cleanFreelancerText(raw)}`;
+}
+
+function upworkCategoryFromJob(posting = {}, skills = []) {
+  const explicit = cleanFreelancerText(posting.category || posting.categoryName || posting.subcategory || posting.occupation?.name);
+  if (explicit) return explicit;
+  return freelancerCategoryFromSkills(skills);
+}
+
+function buildUpworkJobUrl(posting = {}) {
+  const direct = stringValue(posting.url || posting.webUrl || posting.canonicalUrl);
+  if (direct) return direct.startsWith('http') ? direct : `${trimTrailingSlash(UPWORK_PROJECT_BASE)}${direct.startsWith('/') ? '' : '/'}${direct}`;
+  const externalId = upworkExternalId(posting);
+  if (!externalId) return trimTrailingSlash(UPWORK_PROJECT_BASE);
+  const id = externalId.startsWith('~') ? externalId : `~${externalId}`;
+  return `${trimTrailingSlash(UPWORK_PROJECT_BASE)}/jobs/${encodeURIComponent(id)}`;
+}
+
+function decodeHtmlEntities(value) {
+  const named = {
+    amp: '&',
+    lt: '<',
+    gt: '>',
+    quot: '"',
+    apos: "'",
+    nbsp: ' ',
+    rsquo: "'",
+    lsquo: "'",
+    ldquo: '"',
+    rdquo: '"',
+    ndash: '-',
+    mdash: '-',
+    bull: '-',
+    aacute: 'á',
+    eacute: 'é',
+    iacute: 'í',
+    oacute: 'ó',
+    uacute: 'ú',
+    ntilde: 'ñ',
+    Aacute: 'Á',
+    Eacute: 'É',
+    Iacute: 'Í',
+    Oacute: 'Ó',
+    Uacute: 'Ú',
+    Ntilde: 'Ñ'
+  };
+
+  return String(value || '')
+    .replace(/&#(\d+);/g, (_match, code) => String.fromCodePoint(Number(code)))
+    .replace(/&#x([0-9a-f]+);/gi, (_match, code) => String.fromCodePoint(Number.parseInt(code, 16)))
+    .replace(/&([a-zA-Z][a-zA-Z0-9]+);/g, (match, name) => Object.hasOwn(named, name) ? named[name] : match)
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#039;/g, "'")
+    .replace(/&apos;/g, "'")
+    .replace(/&rsquo;/g, "'")
+    .replace(/&lsquo;/g, "'")
+    .replace(/&ldquo;/g, '"')
+    .replace(/&rdquo;/g, '"')
+    .replace(/&ndash;/g, '-')
+    .replace(/&mdash;/g, '-')
+    .replace(/&bull;/g, '-')
+    .replace(/&nbsp;/g, ' ');
+}
+
+function freelancerCategoryFromSkills(skills) {
+  const text = normalizeText(skills.join(' '));
+  if (hasAny(text, ['website', 'web development', 'html', 'css', 'javascript', 'wordpress', 'shopify', 'woocommerce', 'php', 'react', 'next.js'])) {
+    return 'Freelancer / Website';
+  }
+  if (hasAny(text, ['graphic design', 'logo', 'branding', 'illustrator', 'photoshop', 'figma', 'ui', 'ux', 'typography'])) {
+    return 'Freelancer / Design';
+  }
+  return 'Freelancer / Other';
+}
+
+function parseCsvList(value) {
+  return String(value || '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function buildSourceSummary(jobs, rawJobs = []) {
+  const summary = {
+    freehunter: { normalized: 0, raw: 0 },
+    freelancer: { normalized: 0, raw: 0 },
+    upwork: { normalized: 0, raw: 0 }
+  };
+
+  for (const job of jobs) {
+    const source = summary[job.source] ? job.source : 'freehunter';
+    summary[source].normalized += 1;
+  }
+
+  for (const job of rawJobs) {
+    const source = summary[job.source] ? job.source : 'freehunter';
+    summary[source].raw += 1;
+  }
+
+  return summary;
 }
 
 function budgetRank(budget) {
@@ -1109,11 +2204,11 @@ function restoreStoredAiAnalysis(jobs, store) {
       continue;
     }
 
-    job.aiAnalysis = {
+    job.aiAnalysis = normalizeAnalysisForDisplay(job, {
       ...job.aiAnalysis,
       ...storedAnalysis,
       emailDraft: storedAnalysis.emailDraft || job.aiAnalysis?.emailDraft
-    };
+    });
     summary.reused += 1;
   }
 
@@ -1241,6 +2336,7 @@ function mergeJobsIntoStore(jobs, store) {
         opportunity.statusUpdatedAt = nowIso;
         changed = true;
       }
+      job.aiAnalysis = normalizeAnalysisForDisplay(job, job.aiAnalysis);
       if (!opportunity.draft || opportunity.draft.status === 'generated') {
         opportunity.draft = draftFromAnalysis(job.aiAnalysis, opportunity.draft?.status || 'generated', nowIso, opportunity.draft);
         changed = true;
@@ -1283,18 +2379,32 @@ function mergeJobsIntoStore(jobs, store) {
 }
 
 function draftFromAnalysis(analysis = {}, status = 'generated', nowIso = new Date().toISOString(), previous = {}) {
+  previous = previous && typeof previous === 'object' ? previous : {};
   const draft = analysis.emailDraft || {};
+  const draftSource = draft.source || (analysis.llmReview?.reviewMode === 'analysis_and_draft' && analysis.llmReview?.status === 'reviewed'
+    ? analysis.llmReview.provider || 'ai'
+    : previous.source || 'rule_fallback');
   return {
     type: draft.type || previous.type || 'clarify',
     subject: draft.subject || previous.subject || '',
     body: normalizeOwnerSignature(draft.body || previous.body || ''),
     status: DRAFT_STATUSES.has(status) ? status : 'generated',
-    source: analysis.llmReview?.provider || previous.source || 'rule',
+    source: draftSource,
+    sourceDetail: draft.sourceDetail || previous.sourceDetail || draftSourceDetail(draftSource, analysis),
     generatedAt: previous.generatedAt || nowIso,
     updatedAt: nowIso,
     approvedAt: previous.approvedAt || null,
     copiedAt: previous.copiedAt || null
   };
+}
+
+function draftSourceDetail(source, analysis = {}) {
+  if (source === 'ai' || source === analysis.llmReview?.provider) {
+    return `${analysis.llmReview?.provider || 'AI'} generated draft${analysis.llmReview?.model ? ` · ${analysis.llmReview.model}` : ''}`;
+  }
+  if (source === 'rule_fallback') return 'Rule fallback draft generated locally from job detail and latest analysis';
+  if (source === 'missing') return 'No draft available';
+  return 'Manual or legacy draft';
 }
 
 function publicOpportunity(opportunity) {
@@ -1472,6 +2582,182 @@ async function updateDraft(body) {
 
   await writeStore(store);
   return { ok: true, opportunity: publicOpportunity(opportunity) };
+}
+
+async function generateJobAiDraft(body) {
+  const jobId = Number(body.jobId);
+  if (!jobId) return invalidRequest('jobId is required');
+
+  const config = getLlmConfig();
+  const reviewMode = 'draft_only';
+  if (!config.enabled) {
+    return invalidRequest(`AI draft generation is not enabled: ${config.reason || config.mode || config.provider}`);
+  }
+
+  const store = await readStore();
+  const opportunity = ensureOpportunity(store, jobId);
+  const job = normalizeAiDraftJob(body.job || {}, jobId, opportunity);
+  const signature = jobContentSignature(job);
+  const nowIso = new Date().toISOString();
+
+  if (hasReusableAiDraft(opportunity, signature, config, reviewMode)) {
+    job.aiAnalysis = normalizeAnalysisForDisplay(job, opportunity.aiAnalysis);
+    opportunity.draft = draftFromAnalysis(job.aiAnalysis, opportunity.draft?.status || 'generated', nowIso, opportunity.draft);
+    opportunity.updatedAt = nowIso;
+    pushEvent(opportunity, 'ai_draft_reused', `Reused existing AI draft for unchanged job #${jobId}`);
+    await writeStore(store);
+    return {
+      ok: true,
+      reused: true,
+      sideEffect: 'no_provider_call_existing_ai_draft_reused',
+      job: publicAiJob(job, opportunity),
+      opportunity: publicOpportunity(opportunity)
+    };
+  }
+
+  const estimatedCost = estimateLlmCost(job, config, reviewMode);
+  const dailyUsed = usageTotal(store, 'day');
+  const monthlyUsed = usageTotal(store, 'month');
+  if (dailyUsed + estimatedCost > LLM_DAILY_USD_CAP || monthlyUsed + estimatedCost > LLM_MONTHLY_USD_CAP) {
+    const error = new Error('LLM cost cap would be exceeded. No AI draft was generated.');
+    error.statusCode = 429;
+    throw error;
+  }
+
+  let review;
+  try {
+    review = config.provider === 'mock'
+      ? mockDraftReview(job, reviewMode)
+      : await generateEmailDraftWithProvider(job, config);
+  } catch (error) {
+    opportunity.updatedAt = nowIso;
+    pushEvent(opportunity, 'ai_draft_error', 'AI draft generation failed. Existing draft was kept.', {
+      error: error instanceof Error ? error.message : String(error)
+    });
+    await writeStore(store);
+    return {
+      ok: false,
+      error: 'ai_draft_error',
+      message: error instanceof Error ? error.message : String(error),
+      sideEffect: 'no_draft_changed'
+    };
+  }
+
+  const currentAnalysis = normalizeAnalysisForDisplay(job, job.aiAnalysis);
+  job.aiAnalysis = {
+    ...currentAnalysis,
+    emailDraft: normalizeEmailDraft(review.emailDraft, currentAnalysis.status, currentAnalysis.emailDraft, config.provider),
+    llmReview: {
+      ...(currentAnalysis.llmReview || {}),
+      provider: config.provider,
+      model: config.model,
+      reviewMode,
+      status: 'reviewed',
+      schemaVersion: LLM_REVIEW_SCHEMA_VERSION,
+      reviewedAt: nowIso
+    }
+  };
+
+  const usage = review.usage || {};
+  const cost = usage.inputTokens || usage.outputTokens ? costFromUsage(usage, config) : estimatedCost;
+  store.llmUsage.unshift({
+    id: randomUUID(),
+    at: nowIso,
+    provider: config.provider,
+    model: config.model,
+    reviewMode,
+    schemaVersion: LLM_REVIEW_SCHEMA_VERSION,
+    jobId: job.id,
+    estimatedUsd: roundMoney(cost),
+    actualUsd: usage.actualUsd || 0,
+    inputTokens: usage.inputTokens || estimateTokens(buildLlmPrompt(job, reviewMode)),
+    outputTokens: usage.outputTokens || estimateTokens(JSON.stringify(review)),
+    attempts: usage.attempts || 1,
+    parseRetries: usage.parseRetries || 0,
+    trigger: 'manual_selected_job_ai_draft'
+  });
+  store.llmUsage = store.llmUsage.slice(0, 500);
+
+  opportunity.clientId = job.clientId || opportunity.clientId || null;
+  opportunity.aiAnalysis = job.aiAnalysis;
+  opportunity.aiAnalysisSignature = signature;
+  opportunity.aiAnalysisUpdatedAt = nowIso;
+  opportunity.draft = draftFromAnalysis(job.aiAnalysis, 'generated', nowIso, opportunity.draft);
+  if (['new', 'archived'].includes(opportunity.pipelineStatus)) {
+    opportunity.pipelineStatus = recommendedPipelineStatus(job.aiAnalysis?.status);
+    opportunity.statusUpdatedAt = nowIso;
+  }
+  opportunity.updatedAt = nowIso;
+  pushEvent(opportunity, 'ai_draft_generated', `AI draft generated manually for job #${jobId}`);
+
+  await writeStore(store);
+  return {
+    ok: true,
+    reused: false,
+    sideEffect: 'provider_called_for_selected_job_only',
+    estimatedCostUsd: roundMoney(cost),
+    job: publicAiJob(job, opportunity),
+    opportunity: publicOpportunity(opportunity)
+  };
+}
+
+function normalizeAiDraftJob(rawJob, jobId, opportunity = {}) {
+  const fallbackAnalysis = opportunity.aiAnalysis && typeof opportunity.aiAnalysis === 'object' ? opportunity.aiAnalysis : {};
+  const rawAnalysis = rawJob.aiAnalysis && typeof rawJob.aiAnalysis === 'object' ? rawJob.aiAnalysis : fallbackAnalysis;
+  const job = {
+    id: jobId,
+    title: stringValue(rawJob.title || `Job ${jobId}`).slice(0, 500),
+    detail: stringValue(rawJob.detail).slice(0, 30000),
+    hideDetail: stringValue(rawJob.hideDetail).slice(0, 30000),
+    clientId: rawJob.clientId || opportunity.clientId || null,
+    clientName: stringValue(rawJob.clientName).slice(0, 200),
+    clientEmail: stringValue(rawJob.clientEmail).slice(0, 300),
+    categoryName: stringValue(rawJob.categoryName).slice(0, 200),
+    skills: Array.isArray(rawJob.skills) ? rawJob.skills.map(stringValue).slice(0, 20) : [],
+    budget: stringValue(rawJob.budget).slice(0, 200),
+    status: stringValue(rawJob.status).slice(0, 80),
+    duration: stringValue(rawJob.duration).slice(0, 100),
+    location: stringValue(rawJob.location).slice(0, 200),
+    source: stringValue(rawJob.source || 'freehunter').slice(0, 80),
+    sourceLabel: stringValue(rawJob.sourceLabel || '').slice(0, 100),
+    sourceExternalId: rawJob.sourceExternalId || null,
+    sourceUrl: stringValue(rawJob.sourceUrl).slice(0, 1000),
+    sourceKeyword: stringValue(rawJob.sourceKeyword).slice(0, 200),
+    createdAtSeconds: Number(rawJob.createdAtSeconds || 0),
+    latestModifySeconds: Number(rawJob.latestModifySeconds || 0),
+    aiAnalysis: rawAnalysis
+  };
+  job.aiAnalysis = normalizeAnalysisForDisplay(job, {
+    ...analyzeJob(job),
+    ...rawAnalysis,
+    emailDraft: rawAnalysis.emailDraft || analyzeJob(job).emailDraft
+  });
+  return job;
+}
+
+function hasReusableAiDraft(opportunity = {}, signature, config, reviewMode) {
+  const analysis = opportunity.aiAnalysis || {};
+  const review = analysis.llmReview || {};
+  const draft = analysis.emailDraft || opportunity.draft || {};
+  return Boolean(
+    opportunity.aiAnalysisSignature === signature
+      && review.status === 'reviewed'
+      && review.provider === config.provider
+      && review.model === config.model
+      && review.reviewMode === reviewMode
+      && review.schemaVersion === LLM_REVIEW_SCHEMA_VERSION
+      && draft.body
+      && ['ai', 'openrouter', 'openai', config.provider].includes(draft.source)
+  );
+}
+
+function publicAiJob(job, opportunity) {
+  return {
+    id: job.id,
+    aiAnalysis: job.aiAnalysis,
+    aiAnalysisSignature: jobContentSignature(job),
+    workflow: publicOpportunity(opportunity)
+  };
 }
 
 async function approveDraft(body) {
@@ -1875,6 +3161,8 @@ function buildHermesHandoffPayload(job, opportunity, project, handoffId, outboxP
       clientName: job.clientName,
       clientEmail: job.clientEmail,
       clientId: job.clientId,
+      source: job.source || 'freehunter',
+      sourceUrl: job.sourceUrl || '',
       budget: job.budget,
       categoryName: job.categoryName,
       skills: job.skills,
@@ -2064,9 +3352,17 @@ function normalizeProjectJobSnapshot(rawJob, jobId) {
     budget: stringValue(rawJob.budget).slice(0, 200),
     duration: stringValue(rawJob.duration).slice(0, 100),
     location: stringValue(rawJob.location).slice(0, 200),
+    source: stringValue(rawJob.source || 'freehunter').slice(0, 80),
+    sourceLabel: stringValue(rawJob.sourceLabel || '').slice(0, 100),
+    sourceExternalId: rawJob.sourceExternalId || null,
+    sourceUrl: stringValue(rawJob.sourceUrl).slice(0, 1000),
+    sourceKeyword: stringValue(rawJob.sourceKeyword).slice(0, 200),
     aiAnalysis: {
       status: stringValue(analysis.status),
       score: Number.isFinite(Number(analysis.score)) ? Number(analysis.score) : 0,
+      easyScore: Number.isFinite(Number(analysis.easyScore)) ? Number(analysis.easyScore) : 0,
+      difficultyScore: Number.isFinite(Number(analysis.difficultyScore)) ? Number(analysis.difficultyScore) : 0,
+      difficultyLabel: stringValue(analysis.difficultyLabel),
       summary: stringValue(analysis.summary),
       aiCanDo: Array.isArray(analysis.aiCanDo) ? analysis.aiCanDo.map(stringValue).slice(0, 10) : [],
       humanNeeds: Array.isArray(analysis.humanNeeds) ? analysis.humanNeeds.map(stringValue).slice(0, 10) : [],
@@ -2129,6 +3425,7 @@ function buildWorkerPrompt(job, opportunity, project) {
     'Job:',
     `Title: ${job.title}`,
     `Client: ${job.clientName || '-'} <${job.clientEmail || '-'}>`,
+    `Source: ${job.source || 'freehunter'}${job.sourceUrl ? ` (${job.sourceUrl})` : ''}`,
     `Budget: ${job.budget || '-'}`,
     `Category: ${job.categoryName || '-'}`,
     `Skills: ${job.skills.join(', ') || '-'}`,
@@ -2203,6 +3500,8 @@ function buildProjectBriefMarkdown(job, opportunity, project) {
     `- Job ID: ${job.id}`,
     `- Client: ${job.clientName || '-'} (${job.clientId || '-'})`,
     `- Email: ${job.clientEmail || '-'}`,
+    `- Source: ${job.source || 'freehunter'}`,
+    `- Source URL: ${job.sourceUrl || '-'}`,
     `- Budget: ${job.budget || '-'}`,
     `- Category: ${job.categoryName || '-'}`,
     `- Skills: ${job.skills.join(', ') || '-'}`,
@@ -2372,11 +3671,11 @@ async function maybeEnhanceJobsWithLlm(jobs, store, { llmLimit = LLM_TRIAGE_MAX_
   const results = await mapLimit(candidates, Math.max(1, LLM_CONCURRENCY), async (job) => {
     try {
       const review = config.provider === 'mock'
-        ? mockLlmReview(job)
-        : await reviewJobWithProvider(job, config);
-      applyLlmReview(job, review, config.provider);
+        ? mockLlmReview(job, LLM_REVIEW_MODE)
+        : await reviewJobWithProvider(job, config, LLM_REVIEW_MODE);
+      applyLlmReview(job, review, config.provider, LLM_REVIEW_MODE, config.model);
       const usage = review.usage || {};
-      const cost = usage.inputTokens || usage.outputTokens ? costFromUsage(usage, config) : estimateLlmCost(job, config);
+      const cost = usage.inputTokens || usage.outputTokens ? costFromUsage(usage, config) : estimateLlmCost(job, config, LLM_REVIEW_MODE);
       return {
         reviewed: true,
         event: {
@@ -2538,13 +3837,49 @@ function publicStoreConfig() {
   };
 }
 
+function publicSourceConfig() {
+  return {
+    freehunter: {
+      enabled: FREEHUNTER_ENABLED,
+      apiBase: API_BASE
+    },
+    freelancer: {
+      enabled: FREELANCER_ENABLED,
+      keywords: FREELANCER_KEYWORDS,
+      resultsPerKeyword: FREELANCER_RESULTS_PER_KEYWORD,
+      projectBase: FREELANCER_PROJECT_BASE
+    },
+    upwork: {
+      enabled: UPWORK_ENABLED,
+      tokenConfigured: Boolean(UPWORK_ACCESS_TOKEN),
+      graphqlUrl: UPWORK_GRAPHQL_URL,
+      keywords: UPWORK_KEYWORDS,
+      resultsPerKeyword: UPWORK_RESULTS_PER_KEYWORD,
+      daysPosted: UPWORK_DAYS_POSTED,
+      projectBase: UPWORK_PROJECT_BASE,
+      oauth: publicUpworkOAuthConfig()
+    }
+  };
+}
+
+function publicUpworkOAuthConfig() {
+  return {
+    callbackUrl: UPWORK_REDIRECT_URI,
+    authorizeUrl: '/api/upwork/oauth/start',
+    clientIdConfigured: Boolean(UPWORK_CLIENT_ID),
+    clientSecretConfigured: Boolean(UPWORK_CLIENT_SECRET),
+    stateConfigured: Boolean(UPWORK_OAUTH_STATE),
+    tokenUrl: UPWORK_OAUTH_TOKEN_URL
+  };
+}
+
 function normalizeHermesHandoffMode(value) {
   const normalized = String(value || '').toLowerCase().trim();
   return ['file', 'webhook', 'both', 'disabled'].includes(normalized) ? normalized : 'file';
 }
 
-async function reviewJobWithProvider(job, config) {
-  const prompt = buildLlmPrompt(job, LLM_REVIEW_MODE);
+async function reviewJobWithProvider(job, config, reviewMode = LLM_REVIEW_MODE) {
+  const prompt = buildLlmPrompt(job, reviewMode);
   const endpoint = `${config.baseUrl}/chat/completions`;
   const usage = {
     inputTokens: 0,
@@ -2556,7 +3891,7 @@ async function reviewJobWithProvider(job, config) {
   const payload = {
     model: config.model,
     temperature: 0,
-    max_tokens: LLM_REVIEW_MODE === 'analysis_only' ? 900 : 1250,
+    max_tokens: reviewMode === 'analysis_only' ? 900 : 1250,
     response_format: { type: 'json_object' },
     messages: [
       {
@@ -2584,7 +3919,7 @@ async function reviewJobWithProvider(job, config) {
     usage.parseRetries += 1;
     const retryPayload = {
       ...payload,
-      max_tokens: LLM_REVIEW_MODE === 'analysis_only' ? 750 : 1050,
+      max_tokens: reviewMode === 'analysis_only' ? 750 : 1050,
       messages: [
         {
           role: 'system',
@@ -2603,6 +3938,189 @@ async function reviewJobWithProvider(job, config) {
     parsed.usage = usage;
     return parsed;
   }
+}
+
+async function generateEmailDraftWithProvider(job, config) {
+  const prompt = buildEmailDraftPrompt(job);
+  const endpoint = `${config.baseUrl}/chat/completions`;
+  const usage = {
+    inputTokens: 0,
+    outputTokens: 0,
+    actualUsd: 0,
+    attempts: 0,
+    parseRetries: 0
+  };
+  const payload = {
+    model: config.model,
+    temperature: 0.3,
+    max_tokens: 1100,
+    response_format: { type: 'json_object' },
+    messages: [
+      {
+        role: 'system',
+        content:
+          'You write concise Hong Kong Cantonese freelance outreach emails. Return one valid JSON object only. No markdown, no code fences, no extra prose.'
+      },
+      {
+        role: 'user',
+        content: prompt
+      }
+    ]
+  };
+
+  const first = await callChatCompletion(endpoint, payload, config);
+  addUsage(usage, first.usage);
+
+  try {
+    const parsed = parseLlmJson(first.content);
+    const normalized = normalizeDraftReview(parsed, job);
+    normalized.usage = usage;
+    return normalized;
+  } catch (firstError) {
+    usage.parseRetries += 1;
+    const retryPayload = {
+      ...payload,
+      temperature: 0,
+      max_tokens: 900,
+      messages: [
+        {
+          role: 'system',
+          content: 'Repair malformed output into one valid JSON object. Return JSON only.'
+        },
+        {
+          role: 'user',
+          content: buildEmailDraftRepairPrompt(job, first.content, firstError)
+        }
+      ]
+    };
+    const second = await callChatCompletion(endpoint, retryPayload, config);
+    addUsage(usage, second.usage);
+
+    try {
+      const parsed = parseLlmJson(second.content);
+      const normalized = normalizeDraftReview(parsed, job);
+      normalized.usage = usage;
+      return normalized;
+    } catch {
+      const error = new Error('AI provider returned a draft that was not valid JSON. Existing fallback draft was kept.');
+      error.statusCode = 502;
+      throw error;
+    }
+  }
+}
+
+function buildEmailDraftPrompt(job) {
+  const analysis = job.aiAnalysis || {};
+  const quote = analysis.quoteRecommendation || {};
+  const draftType = quote.canQuote ? 'apply' : 'clarify';
+  return JSON.stringify(
+    {
+      task: 'Write one personalized client-facing email draft for this selected Freehunter job. Do not rescore the job.',
+      outputShape: {
+        emailDraft: {
+          type: 'apply|clarify|skip',
+          subject: 'short subject in Traditional Chinese / Hong Kong Cantonese',
+          body: 'complete email body in Traditional Chinese / Hong Kong Cantonese'
+        }
+      },
+      requiredDraftType: draftType,
+      styleRules: [
+        'Use Traditional Chinese / Hong Kong Cantonese written style.',
+        'Sound like Jack Lo, a practical Hong Kong freelancer.',
+        'Human, professional, concise. No AI smell. No marketing fluff.',
+        'Do not mention AI unless the client asked.',
+        'Do not over-promise or claim work is already done.',
+        'Do not send anything; draft only.',
+        'Always sign exactly with: Jack Lo / 51129438.'
+      ],
+      quoteReadyRequirements: [
+        'If requiredDraftType is apply, include greeting, understanding of the job, what Jack can do, initial quote or range, delivery time estimate, included revision count, and ask whether the client can confirm details.',
+        'If job budget is HKD 10,000-50,000 or higher, do not quote an artificially low price.',
+        'Leave negotiation room and state the final price depends on confirmed scope.'
+      ],
+      clarificationRequirements: [
+        'If requiredDraftType is clarify, include greeting, interest in helping, 3-5 focused questions based on the job, rough price direction only if safe, and say final quote depends on confirmed details.',
+        'If information is missing, do not invent a fixed final price.'
+      ],
+      currentAnalysis: {
+        status: analysis.status,
+        score: analysis.score,
+        easyScore: analysis.easyScore,
+        summary: analysis.summary,
+        missingInfo: Array.isArray(analysis.missingInfo) ? analysis.missingInfo.slice(0, 8) : [],
+        risks: Array.isArray(analysis.risks) ? analysis.risks.slice(0, 8) : [],
+        aiCanDo: Array.isArray(analysis.aiCanDo) ? analysis.aiCanDo.slice(0, 8) : [],
+        quoteRecommendation: quote,
+        executionPlan: Array.isArray(analysis.executionPlan) ? analysis.executionPlan.slice(0, 6) : [],
+        fallbackDraft: analysis.emailDraft || null
+      },
+      job: {
+        id: job.id,
+        title: job.title,
+        detail: sanitizeForLlm(truncateForLlm(job.detail, 5000)),
+        hideDetail: sanitizeForLlm(truncateForLlm(job.hideDetail, 1500)),
+        categoryName: job.categoryName,
+        skills: job.skills,
+        budget: job.budget,
+        status: job.status,
+        duration: job.duration,
+        location: job.location,
+        clientNameProvided: Boolean(job.clientName),
+        clientEmailProvided: Boolean(job.clientEmail)
+      },
+      outputRules: [
+        'Return exactly one JSON object.',
+        'No markdown.',
+        'No comments.',
+        'No trailing commas.',
+        'emailDraft.body must be non-empty unless type is skip.'
+      ]
+    },
+    null,
+    2
+  );
+}
+
+function buildEmailDraftRepairPrompt(job, rawContent, error) {
+  return JSON.stringify(
+    {
+      task: 'Repair the malformed email draft into valid JSON. Preserve the intended email where possible.',
+      parseError: error instanceof Error ? error.message : String(error),
+      requiredShape: {
+        emailDraft: {
+          type: 'apply|clarify|skip',
+          subject: 'short subject',
+          body: 'complete Cantonese email body'
+        }
+      },
+      job: {
+        id: job.id,
+        title: job.title,
+        budget: job.budget,
+        categoryName: job.categoryName
+      },
+      malformedContent: sanitizeForLlm(String(rawContent || '').slice(0, 9000)),
+      outputRules: [
+        'Return exactly one valid JSON object.',
+        'No markdown.',
+        'No trailing commas.'
+      ]
+    },
+    null,
+    2
+  );
+}
+
+function normalizeDraftReview(parsed, job) {
+  const source = parsed && typeof parsed === 'object' ? parsed : {};
+  const draft = source.emailDraft && typeof source.emailDraft === 'object' ? source.emailDraft : source;
+  const normalized = normalizeEmailDraft(draft, job.aiAnalysis?.status || 'needs_info', job.aiAnalysis?.emailDraft, 'ai');
+  if (normalized.type !== 'skip' && !normalized.body) {
+    throw new Error('AI provider returned an empty email draft.');
+  }
+  return {
+    emailDraft: normalized
+  };
 }
 
 function buildLlmPrompt(job, reviewMode = LLM_REVIEW_MODE) {
@@ -2631,7 +4149,7 @@ function buildLlmPrompt(job, reviewMode = LLM_REVIEW_MODE) {
     outputShape.emailDraft = {
       type: 'apply|clarify|follow_up|decline|skip',
       subject: 'short subject',
-      body: 'Cantonese email body'
+      body: 'Traditional Chinese / Hong Kong Cantonese email body'
     };
   }
 
@@ -2665,6 +4183,7 @@ function buildLlmPrompt(job, reviewMode = LLM_REVIEW_MODE) {
         'If information is missing but the job is commercially attractive, use needs_info rather than hard.',
         'Set quoteRecommendation.canQuote true only when the brief has enough scope, quantity, deadline/materials, and output expectations to give an initial range.',
         'When quoting, choose a reasonable HKD range with negotiation room. Do not underprice just to win.',
+        'If the job budget is HKD 10,000-50,000, do not quote an artificially low price.',
         'When not quoting, missingInfo must contain the exact questions needed before a price.'
       ],
       allowedStatuses: ['easy', 'needs_info', 'hard', 'not_fit'],
@@ -2673,6 +4192,10 @@ function buildLlmPrompt(job, reviewMode = LLM_REVIEW_MODE) {
         'All human-facing Cantonese must sound like a real Hong Kong freelancer, not AI.',
         'No AI smell, no buzzwords, no mention of AI unless client asked.',
         'Avoid over-promising. Be practical, warm, and specific.',
+        'For quote-ready jobs, the draft must include greeting, understanding of the job, what Jack can do, initial quote/range, delivery time, included revision count, a question to confirm details, and signature: Jack Lo / 51129438.',
+        'For unclear jobs, the draft must include greeting, interest, 3-5 focused questions based on the job, rough price direction only if safe, and signature: Jack Lo / 51129438.',
+        'Use Traditional Chinese / Hong Kong Cantonese written style.',
+        'Do not sound like marketing copy.',
         'Do not claim work is done.',
         'Do not send anything; draft only.'
       ],
@@ -2891,7 +4414,27 @@ function costFromUsage(usage, config) {
     + ((usage?.outputTokens || 0) / 1_000_000) * pricing.outputPerMillion;
 }
 
-function mockLlmReview(job) {
+function mockDraftReview(job, reviewMode = 'draft_only') {
+  const fallback = job.aiAnalysis?.emailDraft || buildEmailDraft(job, {
+    ...(job.aiAnalysis || {}),
+    emailDraftSource: 'ai',
+    emailDraftSourceDetail: 'Mock AI generated draft'
+  });
+  return {
+    emailDraft: {
+      ...fallback,
+      source: 'ai',
+      sourceDetail: 'Mock AI generated draft'
+    },
+    usage: {
+      inputTokens: estimateTokens(buildEmailDraftPrompt(job)),
+      outputTokens: reviewMode === 'draft_only' ? 280 : 350,
+      actualUsd: 0
+    }
+  };
+}
+
+function mockLlmReview(job, reviewMode = LLM_REVIEW_MODE) {
   const analysis = job.aiAnalysis || {};
   return {
     status: analysis.status,
@@ -2905,23 +4448,22 @@ function mockLlmReview(job) {
     pricingHint: analysis.pricingHint,
     quoteRecommendation: analysis.quoteRecommendation,
     executionPlan: analysis.executionPlan || [],
-    ...(LLM_REVIEW_MODE === 'analysis_and_draft' ? { emailDraft: analysis.emailDraft } : {}),
+    ...(reviewMode === 'analysis_and_draft' ? { emailDraft: analysis.emailDraft } : {}),
     usage: {
-      inputTokens: estimateTokens(buildLlmPrompt(job, LLM_REVIEW_MODE)),
-      outputTokens: LLM_REVIEW_MODE === 'analysis_only' ? 180 : 350,
+      inputTokens: estimateTokens(buildLlmPrompt(job, reviewMode)),
+      outputTokens: reviewMode === 'analysis_only' ? 180 : 350,
       actualUsd: 0
     }
   };
 }
 
-function applyLlmReview(job, review, provider) {
+function applyLlmReview(job, review, provider, reviewMode = LLM_REVIEW_MODE, model = getLlmConfig().model) {
   const status = ['easy', 'needs_info', 'hard', 'not_fit'].includes(review.status) ? review.status : job.aiAnalysis.status;
   const score = Number.isFinite(Number(review.score)) ? clamp(Math.round(Number(review.score)), 0, 100) : job.aiAnalysis.score;
   const nextStep = ['draft_apply_email', 'ask_for_details', 'manual_review', 'skip'].includes(review.recommendedNextStep)
     ? review.recommendedNextStep
     : chooseNextStep(status);
-
-  job.aiAnalysis = {
+  const nextAnalysis = {
     ...job.aiAnalysis,
     status,
     score,
@@ -2934,19 +4476,35 @@ function applyLlmReview(job, review, provider) {
     pricingHint: stringValue(review.pricingHint || job.aiAnalysis.pricingHint),
     quoteRecommendation: normalizeQuoteRecommendation(review.quoteRecommendation, job.aiAnalysis.quoteRecommendation),
     executionPlan: Array.isArray(review.executionPlan) ? review.executionPlan.slice(0, 8) : job.aiAnalysis.executionPlan,
-    emailDraft: normalizeEmailDraft(review.emailDraft, status, job.aiAnalysis.emailDraft),
     llmReview: {
       provider,
-      model: getLlmConfig().model,
-      reviewMode: LLM_REVIEW_MODE,
+      model,
+      reviewMode,
       status: 'reviewed',
       schemaVersion: LLM_REVIEW_SCHEMA_VERSION,
       reviewedAt: new Date().toISOString()
     }
   };
+
+  const derived = deriveDifficultyScores(job, nextAnalysis);
+  const reviewedAnalysis = {
+    ...nextAnalysis,
+    ...derived
+  };
+  const hasAiDraft = reviewMode === 'analysis_and_draft' && review.emailDraft && typeof review.emailDraft === 'object';
+  job.aiAnalysis = {
+    ...reviewedAnalysis,
+    emailDraft: hasAiDraft
+      ? normalizeEmailDraft(review.emailDraft, status, job.aiAnalysis.emailDraft, provider)
+      : buildEmailDraft(job, {
+          ...reviewedAnalysis,
+          emailDraftSource: 'rule_fallback',
+          emailDraftSourceDetail: `${provider} reviewed the analysis; draft generated locally to avoid paid draft calls`
+        })
+  };
 }
 
-function normalizeEmailDraft(draft, status, fallback) {
+function normalizeEmailDraft(draft, status, fallback = {}, source = 'rule_fallback') {
   if (!draft || typeof draft !== 'object') return fallback;
   const type = ['apply', 'clarify', 'follow_up', 'decline', 'skip'].includes(draft.type)
     ? draft.type
@@ -2960,7 +4518,9 @@ function normalizeEmailDraft(draft, status, fallback) {
   return {
     type,
     subject: stringValue(draft.subject || fallback?.subject).slice(0, 500),
-    body: stringValue(draft.body || fallback?.body).slice(0, 10000)
+    body: stringValue(draft.body || fallback?.body).slice(0, 10000),
+    source: draft.source || source,
+    sourceDetail: draft.sourceDetail || (source === 'rule_fallback' ? 'Rule fallback draft generated locally from job detail and analysis' : `${source} generated draft`)
   };
 }
 
@@ -2979,9 +4539,9 @@ function normalizeQuoteRecommendation(quote, fallback = {}) {
   };
 }
 
-function estimateLlmCost(job, config) {
-  const inputTokens = estimateTokens(buildLlmPrompt(job, LLM_REVIEW_MODE));
-  const outputTokens = LLM_REVIEW_MODE === 'analysis_only' ? 350 : 700;
+function estimateLlmCost(job, config, reviewMode = LLM_REVIEW_MODE) {
+  const inputTokens = estimateTokens(reviewMode === 'draft_only' ? buildEmailDraftPrompt(job) : buildLlmPrompt(job, reviewMode));
+  const outputTokens = reviewMode === 'analysis_only' ? 350 : reviewMode === 'draft_only' ? 450 : 700;
   const pricing = modelPricing(config);
   return (inputTokens / 1_000_000) * pricing.inputPerMillion + (outputTokens / 1_000_000) * pricing.outputPerMillion;
 }
@@ -3084,6 +4644,14 @@ function sendJson(res, statusCode, payload) {
     'Cache-Control': 'no-store'
   });
   res.end(JSON.stringify(payload));
+}
+
+function sendHtml(res, statusCode, html) {
+  res.writeHead(statusCode, {
+    'Content-Type': 'text/html; charset=utf-8',
+    'Cache-Control': 'no-store'
+  });
+  res.end(html);
 }
 
 function sendText(res, statusCode, text) {

@@ -169,6 +169,24 @@ LLM_MONTHLY_USD_CAP=50
 
 Without `OPENROUTER_API_KEY`, the deployed dashboard still fetches Freehunter jobs and emails, but uses local rule scoring only.
 
+### Upwork OAuth callback
+
+Use this callback URL when applying for the Upwork API key:
+
+```text
+https://freehunter-ai.vercel.app/api/upwork/callback
+```
+
+After Upwork approves the key, set:
+
+```bash
+UPWORK_CLIENT_ID=...
+UPWORK_CLIENT_SECRET=...
+UPWORK_REDIRECT_URI=https://freehunter-ai.vercel.app/api/upwork/callback
+```
+
+Then open `/api/upwork/oauth/start` on the deployed dashboard to authorize the app. The callback page can exchange the authorization code for `UPWORK_ACCESS_TOKEN` and `UPWORK_REFRESH_TOKEN`; treat those values as secrets and add them to Vercel environment variables.
+
 ## LLM Provider Modes
 
 Default is free local rule mode:

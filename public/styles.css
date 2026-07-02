@@ -100,6 +100,10 @@ h2 {
 }
 
 .button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
   min-height: 40px;
   border: 1px solid var(--ink);
   border-radius: 6px;
@@ -144,7 +148,7 @@ h2 {
 
 .metric-strip {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 12px;
   margin-bottom: 14px;
 }
@@ -176,7 +180,7 @@ h2 {
 
 .filters {
   display: grid;
-  grid-template-columns: minmax(240px, 1.45fr) repeat(6, minmax(118px, 1fr)) repeat(2, max-content);
+  grid-template-columns: minmax(240px, 1.45fr) repeat(8, minmax(118px, 1fr)) repeat(2, max-content);
   gap: 10px;
   align-items: end;
   padding: 12px;
@@ -439,6 +443,13 @@ h2 {
   background: var(--green-soft);
 }
 
+.tag.status-open,
+.tag.status-contest-open {
+  border-color: #8ccab5;
+  color: var(--green);
+  background: var(--green-soft);
+}
+
 .tag.status-pending {
   border-color: #ead489;
   color: var(--amber);
@@ -531,6 +542,64 @@ h2 {
   background: var(--red-soft);
 }
 
+.tag.source-missing {
+  border-color: var(--line-strong);
+  color: var(--muted);
+  background: #eef1eb;
+}
+
+.tag.source-manual {
+  border-color: #a7c2ec;
+  color: var(--blue);
+  background: var(--blue-soft);
+}
+
+.tag.source-freehunter {
+  border-color: #8ccab5;
+  color: var(--green);
+  background: var(--green-soft);
+}
+
+.tag.source-freelancer {
+  border-color: #a7c2ec;
+  color: var(--blue);
+  background: var(--blue-soft);
+}
+
+.tag.source-upwork {
+  border-color: #8ccab5;
+  color: var(--green);
+  background: #f0f8f1;
+}
+
+.tag.difficulty-easy,
+.tag.difficulty-hard-easy {
+  border-color: #8ccab5;
+  color: var(--green);
+  background: var(--green-soft);
+}
+
+.tag.difficulty-medium,
+.tag.difficulty-hard-medium {
+  border-color: #a7c2ec;
+  color: var(--blue);
+  background: var(--blue-soft);
+}
+
+.tag.difficulty-hard,
+.tag.difficulty-hard-hard {
+  border-color: #ead489;
+  color: var(--amber);
+  background: var(--amber-soft);
+}
+
+.tag.difficulty-very-hard,
+.tag.difficulty-hard-very-hard {
+  border-color: #edb2aa;
+  color: var(--red);
+  background: var(--red-soft);
+}
+
 .tag.retainer-tag {
   border-color: #8fb7a4;
   color: #0f6048;
@@ -565,19 +634,30 @@ h2 {
   background: var(--red-soft);
 }
 
-.scorebar {
-  height: 7px;
+.scorebar,
+.dual-scorebar {
+  height: 12px;
   margin: 0 0 10px;
   overflow: hidden;
+  border: 1px solid rgba(25, 27, 24, 0.08);
   border-radius: 999px;
   background: #edf1e7;
 }
 
-.scorebar span {
+.scorebar span,
+.dual-scorebar span {
   display: block;
-  height: 100%;
+  height: 50%;
   border-radius: inherit;
+}
+
+.scorebar span,
+.scorebar-ai {
   background: linear-gradient(90deg, var(--green), #f5cc45);
+}
+
+.scorebar-easy {
+  background: linear-gradient(90deg, var(--blue), #8ccab5);
 }
 
 .job-card-summary {
@@ -589,6 +669,17 @@ h2 {
   line-height: 1.55;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 3;
+}
+
+.job-card-signals {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 800;
 }
 
 .client-line {
@@ -764,7 +855,7 @@ h2 {
 
 .analysis-panel {
   display: grid;
-  grid-template-columns: 96px minmax(0, 1fr);
+  grid-template-columns: 96px 96px minmax(0, 1fr);
   gap: 14px;
   align-items: center;
   margin: 14px 0 4px;
@@ -772,6 +863,10 @@ h2 {
   border: 1px solid var(--line-strong);
   border-radius: var(--radius);
   background: var(--green-soft);
+}
+
+.difficulty-meter strong {
+  color: var(--blue);
 }
 
 .analysis-panel.ai-needs-info {
@@ -1044,6 +1139,24 @@ h2 {
   display: block;
   margin-bottom: 12px;
   overflow-wrap: anywhere;
+}
+
+.draft-source-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.draft-source-row span:not(.tag) {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: none;
 }
 
 .communication-form {

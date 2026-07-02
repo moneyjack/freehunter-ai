@@ -7,11 +7,13 @@ const state = {
   filters: {
     query: '',
     status: 'all',
+    source: 'all',
     category: 'all',
     duration: 'all',
     aiStatus: 'all',
     pipelineStatus: 'all',
-    sort: 'aiScore',
+    leadView: 'all',
+    sort: 'aiScoreDesc',
     emailOnly: false,
     retainerOnly: false
   }
@@ -23,10 +25,12 @@ const els = {
   statusLine: document.querySelector('#statusLine'),
   searchInput: document.querySelector('#searchInput'),
   statusFilter: document.querySelector('#statusFilter'),
+  sourceFilter: document.querySelector('#sourceFilter'),
   categoryFilter: document.querySelector('#categoryFilter'),
   durationFilter: document.querySelector('#durationFilter'),
   aiStatusFilter: document.querySelector('#aiStatusFilter'),
   pipelineStatusFilter: document.querySelector('#pipelineStatusFilter'),
+  leadViewFilter: document.querySelector('#leadViewFilter'),
   sortSelect: document.querySelector('#sortSelect'),
   emailOnlyFilter: document.querySelector('#emailOnlyFilter'),
   retainerOnlyFilter: document.querySelector('#retainerOnlyFilter'),
@@ -34,6 +38,8 @@ const els = {
   jobDetail: document.querySelector('#jobDetail'),
   visibleCount: document.querySelector('#visibleCount'),
   metricJobs: document.querySelector('#metricJobs'),
+  metricFreelancer: document.querySelector('#metricFreelancer'),
+  metricUpwork: document.querySelector('#metricUpwork'),
   metricEmails: document.querySelector('#metricEmails'),
   metricApprovalQueue: document.querySelector('#metricApprovalQueue'),
   metricLlmPending: document.querySelector('#metricLlmPending'),
@@ -52,7 +58,9 @@ const durationLabels = {
 const statusLabels = {
   approved: 'Approved',
   pending: 'Pending',
-  finished: 'Finished'
+  finished: 'Finished',
+  open: 'Open',
+  contest_open: 'Contest'
 };
 
 const aiStatusLabels = {
@@ -113,6 +121,10 @@ function init() {
     state.filters.status = event.target.value;
     applyFilters();
   });
+  els.sourceFilter.addEventListener('change', (event) => {
+    state.filters.source = event.target.value;
+    applyFilters();
+  });
   els.categoryFilter.addEventListener('change', (event) => {
     state.filters.category = event.target.value;
     applyFilters();
@@ -127,6 +139,10 @@ function init() {
   });
   els.pipelineStatusFilter.addEventListener('change', (event) => {
     state.filters.pipelineStatus = event.target.value;
+    applyFilters();
+  });
+  els.leadViewFilter.addEventListener('change', (event) => {
+    state.filters.leadView = event.target.value;
     applyFilters();
   });
   els.sortSelect.addEventListener('change', (event) => {
@@ -151,12 +167,22 @@ async function loadRuntimeInfo() {
     const response = await fetch('/api/health');
     const payload = await response.json();
     state.runtime = payload;
+    renderDetail();
     const llm = payload.llm || {};
     const hermes = payload.hermes || {};
     const store = payload.store || {};
+    const sources = payload.sources || {};
+    const enabledSources = [
+      sources.freehunter?.enabled ? 'FreeHunter' : '',
+      sources.freelancer?.enabled ? `Freelancer (${sources.freelancer.keywords?.length || 0} keywords)` : '',
+      sources.upwork?.enabled
+        ? `Upwork (${sources.upwork.keywords?.length || 0} keywords${sources.upwork.tokenConfigured ? '' : ', no token'})`
+        : ''
+    ].filter(Boolean).join(' + ');
     els.opsLine.textContent = [
       `Dashboard ${window.location.origin}`,
       'Start: npm start',
+      `Sources: ${enabledSources || 'none'}`,
       `Store: ${store.provider || 'file'}${store.persistent === false ? ' (temporary)' : ''}`,
       store.path ? `Path: ${store.path}` : '',
       `Projects: ${payload.projectsDir || './projects'}`,
@@ -171,10 +197,10 @@ async function loadRuntimeInfo() {
 }
 
 async function loadJobs(forceRefresh) {
-  setLoading(true, forceRefresh ? 'Refreshing latest jobs and client emails...' : 'Loading latest 30 days of Freehunter jobs and client emails...');
+  setLoading(true, forceRefresh ? 'Refreshing latest jobs across sources...' : 'Loading latest 30 days of jobs across sources...');
 
   try {
-    const response = await fetch(`/api/jobs${forceRefresh ? '?refresh=1' : '?llmLimit=0'}`);
+    const response = await fetch(`/api/jobs${forceRefresh ? '?refresh=1&llmLimit=0' : '?llmLimit=0'}`);
     const payload = await response.json();
 
     if (!response.ok) {
@@ -190,10 +216,11 @@ async function loadJobs(forceRefresh) {
     const cached = state.meta?.cached ? 'cache' : 'live API';
     const windowLabel = state.meta?.lookbackDays ? `latest ${state.meta.lookbackDays} days` : 'all time';
     const sourceCount = state.meta?.sourceCount ?? state.jobs.length;
+    const sourceText = formatSourceSummary(state.meta?.sources || {});
     const since = state.meta?.includedSince ? ` since ${formatIsoDate(state.meta.includedSince)}` : '';
     const llm = state.meta?.llm || {};
     setStatus(
-      `Loaded ${state.jobs.length.toLocaleString()} ${windowLabel} jobs${since} from ${sourceCount.toLocaleString()} total API rows via ${cached}. Emails found for ${state.meta?.emailsFound?.toLocaleString() || 0} job rows. LLM reviewed ${Number(llm.reviewed || 0).toLocaleString()}, reused ${Number(llm.reused || 0).toLocaleString()}, pending ${Number(llm.pendingReview || 0).toLocaleString()}.`
+      `Loaded ${state.jobs.length.toLocaleString()} ${windowLabel} jobs${since} from ${sourceCount.toLocaleString()} total API rows via ${cached}. Sources: ${sourceText}. Emails found for ${state.meta?.emailsFound?.toLocaleString() || 0} FreeHunter rows. LLM reviewed ${Number(llm.reviewed || 0).toLocaleString()}, reused ${Number(llm.reused || 0).toLocaleString()}, pending ${Number(llm.pendingReview || 0).toLocaleString()}.`
     );
   } catch (error) {
     setStatus(error instanceof Error ? error.message : String(error), true);
@@ -204,6 +231,7 @@ async function loadJobs(forceRefresh) {
 
 function populateFilters() {
   setOptions(els.statusFilter, uniqueValues(state.jobs, 'status'), 'All status', statusLabels);
+  setOptions(els.sourceFilter, uniqueValues(state.jobs, 'source'), 'All sources', sourceLabels());
   setOptions(els.categoryFilter, uniqueValues(state.jobs, 'categoryName'), 'All categories');
   setOptions(els.durationFilter, uniqueValues(state.jobs, 'duration'), 'All durations', durationLabels);
   setOptions(els.aiStatusFilter, Object.keys(aiStatusLabels), 'All AI fit', aiStatusLabels);
@@ -227,10 +255,12 @@ function applyFilters() {
   const query = state.filters.query.toLowerCase();
   let jobs = state.jobs.filter((job) => {
     if (state.filters.status !== 'all' && job.status !== state.filters.status) return false;
+    if (state.filters.source !== 'all' && job.source !== state.filters.source) return false;
     if (state.filters.category !== 'all' && job.categoryName !== state.filters.category) return false;
     if (state.filters.duration !== 'all' && job.duration !== state.filters.duration) return false;
     if (state.filters.aiStatus !== 'all' && job.aiAnalysis?.status !== state.filters.aiStatus) return false;
     if (state.filters.pipelineStatus !== 'all' && job.workflow?.pipelineStatus !== state.filters.pipelineStatus) return false;
+    if (state.filters.leadView !== 'all' && !matchesLeadView(job, state.filters.leadView)) return false;
     if (state.filters.emailOnly && !job.clientEmail) return false;
     if (state.filters.retainerOnly && !retainerOpportunity(job).isCandidate) return false;
     if (!query) return true;
@@ -242,6 +272,9 @@ function applyFilters() {
       job.hideDetail,
       job.clientName,
       job.clientEmail,
+      job.source,
+      sourceLabel(job),
+      job.sourceKeyword,
       job.categoryName,
       job.status,
       job.budget,
@@ -281,7 +314,10 @@ function applyFilters() {
 function sortJobs(jobs, sortBy) {
   const copy = [...jobs];
   const sorters = {
-    aiScore: (a, b) => (b.aiAnalysis?.score || 0) - (a.aiAnalysis?.score || 0) || b.createdAtSeconds - a.createdAtSeconds,
+    aiScoreDesc: (a, b) => scoreValue(b) - scoreValue(a) || b.createdAtSeconds - a.createdAtSeconds,
+    aiScoreAsc: (a, b) => scoreValue(a) - scoreValue(b) || b.createdAtSeconds - a.createdAtSeconds,
+    easyDesc: (a, b) => easyValue(b) - easyValue(a) || scoreValue(b) - scoreValue(a) || b.createdAtSeconds - a.createdAtSeconds,
+    easyAsc: (a, b) => easyValue(a) - easyValue(b) || scoreValue(b) - scoreValue(a) || b.createdAtSeconds - a.createdAtSeconds,
     newest: (a, b) => b.createdAtSeconds - a.createdAtSeconds || b.id - a.id,
     modified: (a, b) => b.latestModifySeconds - a.latestModifySeconds || b.createdAtSeconds - a.createdAtSeconds,
     budget: (a, b) => budgetRank(b.budget) - budgetRank(a.budget) || b.createdAtSeconds - a.createdAtSeconds,
@@ -290,19 +326,65 @@ function sortJobs(jobs, sortBy) {
   return copy.sort(sorters[sortBy] || sorters.newest);
 }
 
+function matchesLeadView(job, view) {
+  const analysis = job.aiAnalysis || {};
+  const highScore = scoreValue(job) >= 70;
+  const missing = Array.isArray(analysis.missingInfo) && analysis.missingInfo.length > 0;
+  const canQuote = Boolean(analysis.quoteRecommendation?.canQuote);
+  if (view === 'high_easy') return highScore && easyValue(job) >= 70 && analysis.status === 'easy';
+  if (view === 'high_missing') return highScore && missing;
+  if (view === 'high_questions') return highScore && (analysis.status === 'needs_info' || analysis.recommendedNextStep === 'ask_for_details' || missing);
+  if (view === 'high_quote') return highScore && canQuote;
+  return true;
+}
+
+function scoreValue(job) {
+  return Number(job.aiAnalysis?.score || 0);
+}
+
+function easyValue(job) {
+  const analysis = job.aiAnalysis || {};
+  if (Number.isFinite(Number(analysis.easyScore))) return Number(analysis.easyScore);
+  if (Number.isFinite(Number(analysis.difficultyScore))) return 100 - Number(analysis.difficultyScore);
+  const statusBase = {
+    easy: 82,
+    needs_info: 58,
+    hard: 34,
+    not_fit: 12
+  }[analysis.status] || 30;
+  const missingPenalty = Array.isArray(analysis.missingInfo) ? Math.min(24, analysis.missingInfo.length * 8) : 0;
+  const riskPenalty = Array.isArray(analysis.risks) ? Math.min(20, analysis.risks.length * 6) : 0;
+  return Math.max(0, Math.min(100, Math.round(statusBase + scoreValue(job) * 0.12 - missingPenalty - riskPenalty)));
+}
+
+function difficultyValue(job) {
+  return Math.max(0, Math.min(100, 100 - easyValue(job)));
+}
+
 function renderMetrics() {
   const easy = state.jobs.filter((job) => job.aiAnalysis?.status === 'easy').length;
+  const freelancerCount = state.jobs.filter((job) => job.source === 'freelancer').length;
+  const upworkCount = state.jobs.filter((job) => job.source === 'upwork').length;
   const approvalQueue = state.jobs.filter((job) =>
     ['shortlisted', 'needs_info', 'drafted'].includes(job.workflow?.pipelineStatus)
   ).length;
   const latestSeconds = state.jobs.reduce((max, job) => Math.max(max, job.createdAtSeconds || 0), 0);
 
   els.metricJobs.textContent = state.jobs.length.toLocaleString();
+  els.metricFreelancer.textContent = freelancerCount.toLocaleString();
+  els.metricUpwork.textContent = upworkCount.toLocaleString();
   els.metricEmails.textContent = `${state.meta?.emailsFound?.toLocaleString() || 0}`;
   els.metricApprovalQueue.textContent = approvalQueue.toLocaleString();
   els.metricLlmPending.textContent = Number(state.meta?.llm?.pendingReview || 0).toLocaleString();
   els.metricApproved.textContent = easy.toLocaleString();
   els.metricLatest.textContent = latestSeconds ? formatDate(latestSeconds) : '-';
+}
+
+function formatSourceSummary(sources = {}) {
+  const labels = sourceLabels();
+  return Object.entries(labels)
+    .map(([source, label]) => `${label} ${Number(sources[source]?.normalized || 0).toLocaleString()}`)
+    .join(' · ');
 }
 
 function renderJobList() {
@@ -320,28 +402,43 @@ function renderJobList() {
       const emailClass = job.clientEmail ? 'email-ok' : job.emailStatus === 'error' ? 'email-error' : '';
       const aiStatus = job.aiAnalysis?.status || 'not_fit';
       const aiScore = job.aiAnalysis?.score ?? 0;
+      const easyScore = easyValue(job);
+      const difficultyScore = difficultyValue(job);
+      const draft = job.workflow?.draft || job.aiAnalysis?.emailDraft || {};
+      const draftSource = draftSourceInfo(draft, job.aiAnalysis);
       const pipelineStatus = job.workflow?.pipelineStatus || 'new';
       const retainer = retainerOpportunity(job);
+      const source = sourceInfo(job);
       return `
         <button class="job-card${active}" type="button" data-id="${job.id}">
           <div class="job-card-top">
             <h3 class="job-card-title">${escapeHtml(job.title)}</h3>
-            <span class="job-id">#${escapeHtml(String(job.id))}</span>
+            <span class="job-id">${escapeHtml(source.shortId)}</span>
           </div>
           <div class="job-card-meta">
+            ${tag(source.label, source.className)}
             ${tag(statusLabels[job.status] || job.status || 'Unknown', statusClass)}
             ${tag(`${aiStatusLabels[aiStatus] || aiStatus} · ${aiScore}`, `ai-${slug(aiStatus)}`)}
+            ${tag(`Easy ${easyScore}`, `difficulty-${difficultyBucket(easyScore)}`)}
+            ${tag(draftSource.shortLabel, draftSource.className)}
             ${tag(pipelineStatusLabels[pipelineStatus] || pipelineStatus, `pipe-${slug(pipelineStatus)}`)}
             ${retainer.isCandidate ? tag('AI retainer exp', 'retainer-tag') : ''}
             ${tag(job.categoryName || 'No category')}
             ${tag(job.budget || 'No budget')}
             ${job.boostStatus ? tag('Boosted', 'status-approved') : ''}
           </div>
-          <div class="scorebar" aria-hidden="true"><span style="width: ${Math.max(4, Math.min(100, aiScore))}%"></span></div>
+          <div class="dual-scorebar" aria-hidden="true">
+            <span class="scorebar-ai" style="width: ${Math.max(4, Math.min(100, aiScore))}%"></span>
+            <span class="scorebar-easy" style="width: ${Math.max(4, Math.min(100, easyScore))}%"></span>
+          </div>
           <p class="job-card-summary">${escapeHtml(job.detail || job.hideDetail || 'No detail supplied.')}</p>
+          <div class="job-card-signals">
+            <span>${escapeHtml(job.aiAnalysis?.quoteRecommendation?.canQuote ? '可初步報價' : job.aiAnalysis?.missingInfo?.length ? '要追資料' : '先人工睇')}</span>
+            <span>Hard ${escapeHtml(String(difficultyScore))}</span>
+          </div>
           <div class="client-line">
             <span>${escapeHtml(job.clientName || `Client ${job.clientId || '-'}`)}</span>
-            <span class="email-text ${emailClass}">${escapeHtml(job.clientEmail || 'Email not found')}</span>
+            <span class="email-text ${emailClass}">${escapeHtml(job.clientEmail || marketplaceActionText(job) || 'Email not found')}</span>
           </div>
         </button>
       `;
@@ -376,16 +473,24 @@ function renderDetail() {
   const quote = analysis.quoteRecommendation || {};
   const executionPlan = Array.isArray(analysis.executionPlan) ? analysis.executionPlan : [];
   const retainer = retainerOpportunity(job);
+  const easyScore = easyValue(job);
+  const difficultyScore = difficultyValue(job);
+  const draftSource = draftSourceInfo(draft, analysis);
+  const jobSource = sourceInfo(job);
 
   els.jobDetail.className = 'detail-inner';
   els.jobDetail.innerHTML = `
     <div class="detail-title-row">
       <div>
         <div class="detail-meta">
-          ${tag(`#${job.id}`)}
+          ${tag(jobSource.shortId)}
+          ${tag(jobSource.label, jobSource.className)}
           ${tag(statusLabels[job.status] || job.status || 'Unknown', `status-${slug(job.status)}`)}
           ${tag(`${aiStatusLabels[analysis.status] || analysis.status || 'AI fit'} · ${analysis.score ?? 0}`, `ai-${slug(analysis.status)}`)}
+          ${tag(`Easy ${easyScore}`, `difficulty-${difficultyBucket(easyScore)}`)}
+          ${tag(`Hard ${difficultyScore}`, `difficulty-hard-${difficultyBucket(easyScore)}`)}
           ${tag(source.label, source.className)}
+          ${tag(draftSource.label, draftSource.className)}
           ${tag(pipelineStatusLabels[pipelineStatus] || pipelineStatus, `pipe-${slug(pipelineStatus)}`)}
           ${retainer.isCandidate ? tag('AI retainer exp', 'retainer-tag') : ''}
           ${job.directApply ? tag('Direct apply', 'email-ok') : ''}
@@ -393,6 +498,7 @@ function renderDetail() {
         <h2>${escapeHtml(job.title)}</h2>
       </div>
       <div class="detail-actions">
+        ${job.sourceUrl ? `<a class="button ghost" href="${escapeAttr(job.sourceUrl)}" target="_blank" rel="noreferrer">Open job</a>` : ''}
         <button class="button ghost" id="copyBriefButton" type="button">Copy brief</button>
       </div>
     </div>
@@ -423,11 +529,13 @@ function renderDetail() {
 
     <div class="client-box">
       <div>
-        <span>Client email</span>
+        <span>${job.source === 'freelancer' || job.source === 'upwork' ? `${sourceLabel(job)} action` : 'Client email'}</span>
         ${
           job.clientEmail
             ? `<a href="mailto:${escapeAttr(job.clientEmail)}">${escapeHtml(job.clientEmail)}</a>`
-            : `<strong>${escapeHtml(job.emailError || 'Email not found')}</strong>`
+            : job.sourceUrl
+              ? `<a href="${escapeAttr(job.sourceUrl)}" target="_blank" rel="noreferrer">${escapeHtml(marketplaceActionText(job))}</a>`
+              : `<strong>${escapeHtml(job.emailError || 'Email not found')}</strong>`
         }
       </div>
       <button class="button ghost" id="copyEmailButton" type="button" ${job.clientEmail ? '' : 'disabled'}>Copy email</button>
@@ -435,7 +543,10 @@ function renderDetail() {
 
     <div class="detail-grid">
       ${fact('AI Fit', `${aiStatusLabels[analysis.status] || '-'} · ${analysis.score ?? 0}/100`)}
+      ${fact('Easy / Difficulty', `${easyScore}/100 easy · ${difficultyScore}/100 hard`)}
       ${fact('Score Source', source.detail)}
+      ${fact('Email Draft Source', draftSource.detail)}
+      ${fact('Source', `${jobSource.label}${job.sourceKeyword ? ` · ${job.sourceKeyword}` : ''}`)}
       ${fact('Next Step', nextStepLabels[analysis.recommendedNextStep] || '-')}
       ${fact('Pricing', analysis.pricingHint || '-')}
       ${fact('Client', `${job.clientName || '-'}${job.clientId ? ` · ID ${job.clientId}` : ''}`)}
@@ -444,12 +555,17 @@ function renderDetail() {
       ${fact('Duration', durationLabels[job.duration] || job.duration || '-')}
       ${fact('Location', [job.location, job.posterLocation].filter(Boolean).join(' · ') || '-')}
       ${fact('Created', `${formatDate(job.createdAtSeconds)}${job.createdAtText ? ` · ${job.createdAtText}` : ''}`)}
+      ${job.sourceUrl ? fact('Job URL', job.sourceUrl) : ''}
     </div>
 
     <div class="analysis-panel ai-${escapeAttr(slug(analysis.status))}">
       <div class="analysis-score">
         <span>${escapeHtml(aiStatusLabels[analysis.status] || 'AI Fit')}</span>
         <strong>${escapeHtml(String(analysis.score ?? 0))}</strong>
+      </div>
+      <div class="analysis-score difficulty-meter">
+        <span>Easy</span>
+        <strong>${escapeHtml(String(easyScore))}</strong>
       </div>
       <p>${escapeHtml(analysis.summary || '未有分析。')}</p>
     </div>
@@ -553,6 +669,7 @@ function renderDetail() {
       <div class="section-title-row">
         <h3>廣東話 email draft</h3>
         <div class="draft-actions">
+          <button class="button secondary" id="generateAiDraftButton" type="button" ${canGenerateAiDraft() ? '' : 'disabled'}>${draftSource.source === 'openrouter' || draftSource.source === 'openai' || draftSource.source === 'ai' ? 'Check AI draft' : 'AI 寫呢封'}</button>
           <button class="button ghost" id="saveDraftButton" type="button" ${draft.body ? '' : 'disabled'}>Save edit</button>
           <button class="button ghost" id="copyDraftButton" type="button" ${draft.body ? '' : 'disabled'}>Copy draft</button>
         </div>
@@ -560,11 +677,15 @@ function renderDetail() {
       ${
         draft.body
           ? `<div class="email-draft">
+              <div class="draft-source-row">
+                ${tag(draftSource.label, draftSource.className)}
+                <span>${escapeHtml(draftSource.detail)}</span>
+              </div>
               <span>Subject</span>
               <input id="draftSubjectInput" type="text" value="${escapeAttr(draft.subject)}" />
               <span>Body</span>
               <textarea id="draftBodyInput" rows="12">${escapeHtml(draft.body)}</textarea>
-              <p class="draft-meta">Draft status: ${escapeHtml(draft.status || 'generated')} · Source: ${escapeHtml(draft.source || 'rule')}</p>
+              <p class="draft-meta">Draft status: ${escapeHtml(draft.status || 'generated')} · Source: ${escapeHtml(draft.source || draftSource.source || 'rule_fallback')}</p>
             </div>`
           : '<p class="quiet">呢類 job 暫時唔建議主動聯絡。</p>'
       }
@@ -623,6 +744,7 @@ function renderDetail() {
 
   document.querySelector('#copyEmailButton')?.addEventListener('click', () => copyText(job.clientEmail, 'Email copied.'));
   document.querySelector('#copyBriefButton')?.addEventListener('click', () => copyText(buildBrief(job), 'Brief copied.'));
+  document.querySelector('#generateAiDraftButton')?.addEventListener('click', () => generateAiDraft(job));
   document.querySelector('#copyDraftButton')?.addEventListener('click', () => copyDraft(job));
   document.querySelector('#saveDraftButton')?.addEventListener('click', () => saveDraft(job));
   document.querySelector('#saveWorkflowButton')?.addEventListener('click', () => saveWorkflow(job));
@@ -807,6 +929,41 @@ function retainerOpportunity(job) {
   };
 }
 
+function sourceLabels() {
+  return {
+    freehunter: 'FreeHunter',
+    freelancer: 'Freelancer',
+    upwork: 'Upwork'
+  };
+}
+
+function sourceLabel(job) {
+  return sourceInfo(job).label;
+}
+
+function sourceInfo(job = {}) {
+  const source = ['freelancer', 'upwork'].includes(job.source) ? job.source : 'freehunter';
+  const labels = sourceLabels();
+  const externalId = job.sourceExternalId || (source === 'freelancer' ? Number(job.id || 0) - 800000000000 : job.id);
+  const prefixes = {
+    freehunter: 'FH',
+    freelancer: 'FL',
+    upwork: 'UP'
+  };
+  return {
+    source,
+    label: labels[source],
+    className: `source-${source}`,
+    shortId: `${prefixes[source] || 'JOB'} #${externalId || job.id || '-'}`
+  };
+}
+
+function marketplaceActionText(job = {}) {
+  if (job.source === 'freelancer') return 'Bid on Freelancer';
+  if (job.source === 'upwork') return 'Bid on Upwork';
+  return '';
+}
+
 function buildRetainerPackageTerms(job) {
   const text = normalizeSearchText([job.title, job.detail, job.categoryName, ...(job.skills || [])].join(' '));
   if (textHasAny(text, ['social media', '社交媒體', 'ig', 'post', 'story', 'reels'])) {
@@ -884,6 +1041,53 @@ function analysisSource(analysis = {}) {
   };
 }
 
+function draftSourceInfo(draft = {}, analysis = {}) {
+  const source = draft?.source || analysis.emailDraft?.source || '';
+  const sourceDetail = draft?.sourceDetail || analysis.emailDraft?.sourceDetail || '';
+  if (!draft?.body && !analysis.emailDraft?.body) {
+    return {
+      source: 'missing',
+      label: 'Draft missing',
+      shortLabel: 'No draft',
+      detail: 'No client-facing email draft is available for this job.',
+      className: 'source-missing'
+    };
+  }
+  if (source === 'ai' || source === 'openrouter' || source === 'openai' || (analysis.llmReview?.status === 'reviewed' && analysis.llmReview?.reviewMode === 'analysis_and_draft')) {
+    return {
+      source: source || 'ai',
+      label: 'Email draft: AI',
+      shortLabel: 'AI draft',
+      detail: sourceDetail || `${analysis.llmReview?.provider || 'AI'} generated this draft.`,
+      className: 'source-reviewed'
+    };
+  }
+  if (source === 'manual') {
+    return {
+      source,
+      label: 'Email draft: edited',
+      shortLabel: 'Edited draft',
+      detail: sourceDetail || 'Jack edited this draft locally.',
+      className: 'source-manual'
+    };
+  }
+  return {
+    source: source || 'rule_fallback',
+    label: 'Email draft: fallback',
+    shortLabel: 'Fallback draft',
+    detail: sourceDetail || 'Local rule fallback draft generated from job detail and AI analysis.',
+    className: 'source-rule'
+  };
+}
+
+function difficultyBucket(easyScore) {
+  const value = Number(easyScore || 0);
+  if (value >= 76) return 'easy';
+  if (value >= 58) return 'medium';
+  if (value >= 36) return 'hard';
+  return 'very-hard';
+}
+
 function setLoading(isLoading, message = '') {
   els.refreshButton.disabled = isLoading;
   els.exportCsvButton.disabled = isLoading || !state.filteredJobs.length;
@@ -957,6 +1161,52 @@ async function saveDraft(job) {
   } else {
     setStatus(payload.message || 'Unable to save draft.', true);
   }
+}
+
+async function generateAiDraft(job) {
+  const button = document.querySelector('#generateAiDraftButton');
+  if (button) button.disabled = true;
+  setStatus('Generating AI draft for this selected job only...');
+
+  const payload = await postJson('/api/job-ai-draft', buildAiDraftPayload(job));
+  if (payload.ok && payload.job && payload.opportunity) {
+    updateJobAiResult(payload.job, payload.opportunity);
+    setStatus(payload.reused
+      ? 'Existing AI draft reused. No provider call was made.'
+      : `AI draft generated for this job only${payload.estimatedCostUsd ? ` · estimated $${payload.estimatedCostUsd}` : ''}.`);
+  } else {
+    setStatus(payload.message || 'Unable to generate AI draft.', true);
+    if (button) button.disabled = false;
+  }
+}
+
+function buildAiDraftPayload(job) {
+  return {
+    jobId: job.id,
+    job: {
+      id: job.id,
+      title: job.title,
+      detail: job.detail,
+      hideDetail: job.hideDetail,
+      clientName: job.clientName,
+      clientEmail: job.clientEmail,
+      clientId: job.clientId,
+      categoryName: job.categoryName,
+      skills: job.skills,
+      budget: job.budget,
+      status: job.status,
+      duration: job.duration,
+      location: job.location,
+      source: job.source,
+      sourceLabel: job.sourceLabel,
+      sourceExternalId: job.sourceExternalId,
+      sourceUrl: job.sourceUrl,
+      sourceKeyword: job.sourceKeyword,
+      createdAtSeconds: job.createdAtSeconds,
+      latestModifySeconds: job.latestModifySeconds,
+      aiAnalysis: job.aiAnalysis
+    }
+  };
 }
 
 async function saveWorkflow(job) {
@@ -1097,6 +1347,11 @@ function buildProjectPayload(job, createWorkspace) {
       budget: job.budget,
       duration: job.duration,
       location: job.location,
+      source: job.source,
+      sourceLabel: job.sourceLabel,
+      sourceExternalId: job.sourceExternalId,
+      sourceUrl: job.sourceUrl,
+      sourceKeyword: job.sourceKeyword,
       aiAnalysis: job.aiAnalysis
     }
   };
@@ -1129,6 +1384,38 @@ function updateJobWorkflow(opportunity, rerender = true) {
     applyFilters();
     renderMetrics();
   }
+}
+
+function updateJobAiResult(jobPatch, opportunity, rerender = true) {
+  state.jobs = state.jobs.map((job) => (
+    job.id === jobPatch.id
+      ? {
+          ...job,
+          aiAnalysis: jobPatch.aiAnalysis || job.aiAnalysis,
+          aiAnalysisSignature: jobPatch.aiAnalysisSignature || job.aiAnalysisSignature,
+          workflow: opportunity
+        }
+      : job
+  ));
+  state.filteredJobs = state.filteredJobs.map((job) => (
+    job.id === jobPatch.id
+      ? {
+          ...job,
+          aiAnalysis: jobPatch.aiAnalysis || job.aiAnalysis,
+          aiAnalysisSignature: jobPatch.aiAnalysisSignature || job.aiAnalysisSignature,
+          workflow: opportunity
+        }
+      : job
+  ));
+  if (rerender) {
+    applyFilters();
+    renderMetrics();
+  }
+}
+
+function canGenerateAiDraft() {
+  const llm = state.runtime?.llm || {};
+  return Boolean(llm.enabled && llm.provider && llm.provider !== 'rule');
 }
 
 function buildBrief(job) {
@@ -1239,6 +1526,9 @@ function exportCsv() {
   const rows = [
     [
       'job_id',
+      'source',
+      'source_external_id',
+      'source_url',
       'created_at_hk',
       'status',
       'title',
@@ -1250,6 +1540,9 @@ function exportCsv() {
       'project_folder',
       'ai_status',
       'ai_score',
+      'easy_score',
+      'difficulty_score',
+      'email_draft_source',
       'ai_summary',
       'next_step',
       'category',
@@ -1262,6 +1555,9 @@ function exportCsv() {
     ],
     ...state.filteredJobs.map((job) => [
       job.id,
+      sourceLabel(job),
+      job.sourceExternalId || '',
+      job.sourceUrl || '',
       formatDate(job.createdAtSeconds),
       job.status,
       job.title,
@@ -1273,6 +1569,9 @@ function exportCsv() {
       job.workflow?.project?.folderPath || '',
       aiStatusLabels[job.aiAnalysis?.status] || job.aiAnalysis?.status || '',
       job.aiAnalysis?.score ?? '',
+      easyValue(job),
+      difficultyValue(job),
+      draftSourceInfo(job.workflow?.draft || job.aiAnalysis?.emailDraft || {}, job.aiAnalysis || {}).source,
       job.aiAnalysis?.summary || '',
       nextStepLabels[job.aiAnalysis?.recommendedNextStep] || job.aiAnalysis?.recommendedNextStep || '',
       job.categoryName,

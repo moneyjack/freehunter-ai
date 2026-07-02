@@ -4,6 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Freehunter AI Job Dashboard</title>
+    <link rel="icon" href="data:," />
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
@@ -15,7 +16,7 @@
         </div>
         <div class="topbar-actions">
           <button class="button secondary" id="exportCsvButton" type="button">Export CSV</button>
-          <button class="button primary" id="refreshButton" type="button">Refresh + score</button>
+          <button class="button primary" id="refreshButton" type="button">Refresh jobs</button>
         </div>
       </header>
 
@@ -25,7 +26,15 @@
           <strong id="metricJobs">-</strong>
         </article>
         <article class="metric">
-          <span class="metric-label">Client Emails</span>
+          <span class="metric-label">Freelancer</span>
+          <strong id="metricFreelancer">-</strong>
+        </article>
+        <article class="metric">
+          <span class="metric-label">Upwork</span>
+          <strong id="metricUpwork">-</strong>
+        </article>
+        <article class="metric">
+          <span class="metric-label">FH Emails</span>
           <strong id="metricEmails">-</strong>
         </article>
         <article class="metric">
@@ -56,6 +65,10 @@
           <select id="statusFilter"></select>
         </label>
         <label>
+          <span>Source</span>
+          <select id="sourceFilter"></select>
+        </label>
+        <label>
           <span>Category</span>
           <select id="categoryFilter"></select>
         </label>
@@ -72,9 +85,22 @@
           <select id="pipelineStatusFilter"></select>
         </label>
         <label>
+          <span>Lead view</span>
+          <select id="leadViewFilter">
+            <option value="all">All leads</option>
+            <option value="high_easy">高分 + 容易</option>
+            <option value="high_missing">高分 + 欠缺資料</option>
+            <option value="high_questions">高分 + 需要追問</option>
+            <option value="high_quote">高分 + 可直接報價</option>
+          </select>
+        </label>
+        <label>
           <span>Sort</span>
           <select id="sortSelect">
-            <option value="aiScore">AI score</option>
+            <option value="aiScoreDesc">AI score high to low</option>
+            <option value="aiScoreAsc">AI score low to high</option>
+            <option value="easyDesc">Easiest first</option>
+            <option value="easyAsc">Hardest first</option>
             <option value="newest">Newest first</option>
             <option value="modified">Recently modified</option>
             <option value="budget">Budget high to low</option>
