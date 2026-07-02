@@ -1622,7 +1622,7 @@ function buildEmailDraft(job, analysis) {
 function buildFreelancerProposalDraft(job, analysis) {
   const quote = analysis.quoteRecommendation || {};
   const questions = buildFreelancerQuestions(analysis.missingInfo, job);
-  const executionPlan = Array.isArray(analysis.executionPlan) ? analysis.executionPlan : [];
+  const executionPlan = buildMarketplaceExecutionPlan(job);
   const deliveryTime = estimateMarketplaceDeliveryTime(job, analysis);
   const quoteLine = quote.canQuote && quote.range
     ? `My initial estimate is ${quote.range.replace('HKD', 'around HKD')}, depending on the final scope and assets.`
@@ -1680,6 +1680,44 @@ function buildFreelancerQuestions(missingInfo, job) {
   }
 
   return unique(questions).slice(0, 5);
+}
+
+function buildMarketplaceExecutionPlan(job) {
+  const text = normalizeText([job.title, job.detail, job.categoryName, ...(job.skills || [])].join(' '));
+
+  if (hasAny(text, ['website', 'web design', 'web development', 'wordpress', 'wix', 'shopify', 'landing page', 'ecommerce', 'portfolio'])) {
+    return [
+      'Confirm the page structure, content, assets, target style, and platform requirements.',
+      'Prepare the first responsive design/build draft so you can review the direction early.',
+      'Refine the layout, copy placement, visuals, and key interactions based on your feedback.',
+      'Deliver the final files, handoff notes, or deployed page once everything is approved.'
+    ];
+  }
+
+  if (hasAny(text, ['logo', 'graphic design', 'branding', 'brand identity', 'poster', 'banner', 'figma', 'photoshop', 'brochure', 'catalog', 'powerpoint', 'presentation'])) {
+    return [
+      'Confirm the brand direction, required dimensions, reference styles, and final file formats.',
+      'Create the first visual concept or editable template for review.',
+      'Refine typography, colors, layout, and details based on your feedback.',
+      'Deliver the approved source files and export-ready assets.'
+    ];
+  }
+
+  if (hasAny(text, ['seo', 'copywriting', 'blog', 'content', 'marketing'])) {
+    return [
+      'Confirm the target audience, tone, keywords, and required content structure.',
+      'Prepare the first content draft in a clean, editable format.',
+      'Revise the copy for clarity, flow, and conversion after your review.',
+      'Deliver the final content with notes for publishing or handoff.'
+    ];
+  }
+
+  return [
+    'Confirm the exact scope, required assets, deadline, and acceptance criteria.',
+    'Prepare a focused first milestone so the direction can be reviewed early.',
+    'Refine the work based on feedback while keeping the scope controlled.',
+    'Deliver the final files and a simple handoff note after approval.'
+  ];
 }
 
 function summarizeMarketplaceUnderstanding(job) {
