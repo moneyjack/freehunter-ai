@@ -477,6 +477,17 @@ function renderDetail() {
   const difficultyScore = difficultyValue(job);
   const draftSource = draftSourceInfo(draft, analysis);
   const jobSource = sourceInfo(job);
+  const isMarketplace = job.source === 'freelancer' || job.source === 'upwork';
+  const draftPanelTitle = isMarketplace ? 'English proposal / cover letter' : '廣東話 email draft';
+  const aiDraftButtonText = draftSource.source === 'openrouter' || draftSource.source === 'openai' || draftSource.source === 'ai'
+    ? 'Check AI draft'
+    : isMarketplace
+      ? 'AI write proposal'
+      : 'AI 寫呢封';
+  const copyDraftButtonText = isMarketplace ? 'Copy proposal' : 'Copy draft';
+  const emptyDraftText = isMarketplace
+    ? 'This marketplace job is not recommended for a proposal yet.'
+    : '呢類 job 暫時唔建議主動聯絡。';
 
   els.jobDetail.className = 'detail-inner';
   els.jobDetail.innerHTML = `
@@ -667,11 +678,11 @@ function renderDetail() {
 
     <div class="detail-section">
       <div class="section-title-row">
-        <h3>廣東話 email draft</h3>
+        <h3>${draftPanelTitle}</h3>
         <div class="draft-actions">
-          <button class="button secondary" id="generateAiDraftButton" type="button" ${canGenerateAiDraft() ? '' : 'disabled'}>${draftSource.source === 'openrouter' || draftSource.source === 'openai' || draftSource.source === 'ai' ? 'Check AI draft' : 'AI 寫呢封'}</button>
+          <button class="button secondary" id="generateAiDraftButton" type="button" ${canGenerateAiDraft() ? '' : 'disabled'}>${aiDraftButtonText}</button>
           <button class="button ghost" id="saveDraftButton" type="button" ${draft.body ? '' : 'disabled'}>Save edit</button>
-          <button class="button ghost" id="copyDraftButton" type="button" ${draft.body ? '' : 'disabled'}>Copy draft</button>
+          <button class="button ghost" id="copyDraftButton" type="button" ${draft.body ? '' : 'disabled'}>${copyDraftButtonText}</button>
         </div>
       </div>
       ${
@@ -687,7 +698,7 @@ function renderDetail() {
               <textarea id="draftBodyInput" rows="12">${escapeHtml(draft.body)}</textarea>
               <p class="draft-meta">Draft status: ${escapeHtml(draft.status || 'generated')} · Source: ${escapeHtml(draft.source || draftSource.source || 'rule_fallback')}</p>
             </div>`
-          : '<p class="quiet">呢類 job 暫時唔建議主動聯絡。</p>'
+          : `<p class="quiet">${emptyDraftText}</p>`
       }
     </div>
 

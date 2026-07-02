@@ -1548,6 +1548,10 @@ function formatHkdRange(low, high) {
   return `HKD ${formatter.format(low)}-${formatter.format(high)}`;
 }
 
+function isMarketplaceJob(job = {}) {
+  return job.source === 'freelancer' || job.source === 'upwork';
+}
+
 function buildEmailDraft(job, analysis) {
   if (analysis.status === 'not_fit') {
     return {
@@ -4013,19 +4017,25 @@ function buildEmailDraftPrompt(job) {
   const analysis = job.aiAnalysis || {};
   const quote = analysis.quoteRecommendation || {};
   const draftType = quote.canQuote ? 'apply' : 'clarify';
+  const marketplace = isMarketplaceJob(job);
+  const clientFacingLanguage = marketplace ? 'English' : 'Traditional Chinese / Hong Kong Cantonese';
+  const sourceLabel = job.sourceLabel || (marketplace ? 'freelance marketplace' : 'Freehunter');
   return JSON.stringify(
     {
-      task: 'Write one personalized client-facing email draft for this selected Freehunter job. Do not rescore the job.',
+      task: marketplace
+        ? `Write one personalized client-facing proposal / cover letter for this selected ${sourceLabel} job. Do not rescore the job.`
+        : 'Write one personalized client-facing email draft for this selected Freehunter job. Do not rescore the job.',
       outputShape: {
         emailDraft: {
           type: 'apply|clarify|skip',
-          subject: 'short subject in Traditional Chinese / Hong Kong Cantonese',
-          body: 'complete email body in Traditional Chinese / Hong Kong Cantonese'
+          subject: marketplace ? 'short subject in English' : 'short subject in Traditional Chinese / Hong Kong Cantonese',
+          body: marketplace ? 'complete proposal / cover letter body in English' : 'complete email body in Traditional Chinese / Hong Kong Cantonese'
         }
       },
       requiredDraftType: draftType,
       styleRules: [
-        'Use Traditional Chinese / Hong Kong Cantonese written style.',
+        `Use ${clientFacingLanguage} only for every client-facing sentence.`,
+        marketplace ? 'For Freelancer and Upwork jobs, the proposal / cover letter must be fully English. Do not write Chinese or Cantonese in the draft.' : 'Use Traditional Chinese / Hong Kong Cantonese written style.',
         'Sound like Jack Lo, a practical Hong Kong freelancer.',
         'Human, professional, concise. No AI smell. No marketing fluff.',
         'Do not mention AI unless the client asked.',
@@ -4056,6 +4066,8 @@ function buildEmailDraftPrompt(job) {
       },
       job: {
         id: job.id,
+        source: job.source || 'freehunter',
+        sourceLabel,
         title: job.title,
         detail: sanitizeForLlm(truncateForLlm(job.detail, 5000)),
         hideDetail: sanitizeForLlm(truncateForLlm(job.hideDetail, 1500)),
@@ -4082,6 +4094,7 @@ function buildEmailDraftPrompt(job) {
 }
 
 function buildEmailDraftRepairPrompt(job, rawContent, error) {
+  const marketplace = isMarketplaceJob(job);
   return JSON.stringify(
     {
       task: 'Repair the malformed email draft into valid JSON. Preserve the intended email where possible.',
@@ -4090,11 +4103,16 @@ function buildEmailDraftRepairPrompt(job, rawContent, error) {
         emailDraft: {
           type: 'apply|clarify|skip',
           subject: 'short subject',
-          body: 'complete Cantonese email body'
+          body: marketplace ? 'complete English proposal / cover letter body' : 'complete Cantonese email body'
         }
       },
+      languageRules: marketplace
+        ? ['The repaired draft must be fully English. Do not include Chinese or Cantonese in subject or body.']
+        : ['The repaired draft must use Traditional Chinese / Hong Kong Cantonese.'],
       job: {
         id: job.id,
+        source: job.source || 'freehunter',
+        sourceLabel: job.sourceLabel || '',
         title: job.title,
         budget: job.budget,
         categoryName: job.categoryName
@@ -4125,6 +4143,8 @@ function normalizeDraftReview(parsed, job) {
 
 function buildLlmPrompt(job, reviewMode = LLM_REVIEW_MODE) {
   const includeDraft = reviewMode === 'analysis_and_draft';
+  const marketplace = isMarketplaceJob(job);
+  const sourceLabel = job.sourceLabel || (marketplace ? 'freelance marketplace' : 'Freehunter');
   const outputShape = {
     status: 'easy|needs_info|hard|not_fit',
     score: '0-100 integer',
@@ -4149,7 +4169,7 @@ function buildLlmPrompt(job, reviewMode = LLM_REVIEW_MODE) {
     outputShape.emailDraft = {
       type: 'apply|clarify|follow_up|decline|skip',
       subject: 'short subject',
-      body: 'Traditional Chinese / Hong Kong Cantonese email body'
+      body: marketplace ? 'English proposal / cover letter body' : 'Traditional Chinese / Hong Kong Cantonese email body'
     };
   }
 
@@ -4157,8 +4177,8 @@ function buildLlmPrompt(job, reviewMode = LLM_REVIEW_MODE) {
     {
       task:
         includeDraft
-          ? 'Review this Freehunter freelance job for AI-assisted acquisition. Return JSON with analysis and a short outreach draft.'
-          : 'Review this Freehunter freelance job for AI-assisted acquisition. Return JSON with analysis only. Do not return emailDraft.',
+          ? `Review this ${sourceLabel} freelance job for AI-assisted acquisition. Return JSON with analysis and a short outreach draft.`
+          : `Review this ${sourceLabel} freelance job for AI-assisted acquisition. Return JSON with analysis only. Do not return emailDraft.`,
       reviewMode,
       reviewerGoal:
         'Use one consistent standard to decide whether Jack Lo should contact this client, how much AI leverage exists, what a human must still do, and whether an initial quote is safe.',
@@ -4190,11 +4210,12 @@ function buildLlmPrompt(job, reviewMode = LLM_REVIEW_MODE) {
       allowedNextSteps: ['draft_apply_email', 'ask_for_details', 'manual_review', 'skip'],
       styleRules: [
         'All human-facing Cantonese must sound like a real Hong Kong freelancer, not AI.',
+        marketplace ? 'For Freelancer and Upwork jobs, every client-facing draft must be fully English. Do not include Chinese or Cantonese in emailDraft.subject or emailDraft.body.' : 'For FreeHunter jobs, client-facing drafts should use Traditional Chinese / Hong Kong Cantonese written style.',
         'No AI smell, no buzzwords, no mention of AI unless client asked.',
         'Avoid over-promising. Be practical, warm, and specific.',
         'For quote-ready jobs, the draft must include greeting, understanding of the job, what Jack can do, initial quote/range, delivery time, included revision count, a question to confirm details, and signature: Jack Lo / 51129438.',
         'For unclear jobs, the draft must include greeting, interest, 3-5 focused questions based on the job, rough price direction only if safe, and signature: Jack Lo / 51129438.',
-        'Use Traditional Chinese / Hong Kong Cantonese written style.',
+        marketplace ? 'Keep internal analysis concise; only the outward proposal / cover letter needs to be English.' : 'Use Traditional Chinese / Hong Kong Cantonese written style.',
         'Do not sound like marketing copy.',
         'Do not claim work is done.',
         'Do not send anything; draft only.'
@@ -4211,6 +4232,8 @@ function buildLlmPrompt(job, reviewMode = LLM_REVIEW_MODE) {
       currentRuleAnalysis: compactRuleAnalysis(job.aiAnalysis),
       job: {
         id: job.id,
+        source: job.source || 'freehunter',
+        sourceLabel,
         title: job.title,
         detail: sanitizeForLlm(truncateForLlm(job.detail, 5000)),
         hideDetail: sanitizeForLlm(truncateForLlm(job.hideDetail, 1800)),
