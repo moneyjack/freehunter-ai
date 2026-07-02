@@ -29,6 +29,13 @@ const FREELANCER_KEYWORDS = parseCsvList(process.env.FREELANCER_KEYWORDS || [
 ].join(','));
 const FREELANCER_RESULTS_PER_KEYWORD = Number(process.env.FREELANCER_RESULTS_PER_KEYWORD || 50);
 const FREELANCER_ID_OFFSET = Number(process.env.FREELANCER_ID_OFFSET || 800000000000);
+const MARKETPLACE_LOW_FIXED_USD_MAX = Number(process.env.MARKETPLACE_LOW_FIXED_USD_MAX || 150);
+const MARKETPLACE_MIN_WORTHWHILE_FIXED_USD = Number(process.env.MARKETPLACE_MIN_WORTHWHILE_FIXED_USD || 250);
+const MARKETPLACE_HIGH_FIXED_USD_MIN = Number(process.env.MARKETPLACE_HIGH_FIXED_USD_MIN || 500);
+const MARKETPLACE_PREMIUM_FIXED_USD_MIN = Number(process.env.MARKETPLACE_PREMIUM_FIXED_USD_MIN || 1000);
+const MARKETPLACE_LOW_HOURLY_USD_MAX = Number(process.env.MARKETPLACE_LOW_HOURLY_USD_MAX || 15);
+const MARKETPLACE_MIN_WORTHWHILE_HOURLY_USD = Number(process.env.MARKETPLACE_MIN_WORTHWHILE_HOURLY_USD || 20);
+const MARKETPLACE_HIGH_HOURLY_USD_MIN = Number(process.env.MARKETPLACE_HIGH_HOURLY_USD_MIN || 30);
 const UPWORK_ACCESS_TOKEN = process.env.UPWORK_ACCESS_TOKEN || process.env.UPWORK_API_TOKEN || '';
 const UPWORK_ENABLED = process.env.UPWORK_ENABLED === '1' || (Boolean(UPWORK_ACCESS_TOKEN) && process.env.UPWORK_ENABLED !== '0');
 const UPWORK_GRAPHQL_URL = process.env.UPWORK_GRAPHQL_URL || 'https://api.upwork.com/graphql';
@@ -91,6 +98,7 @@ const LLM_MONTHLY_USD_CAP = Number(process.env.LLM_MONTHLY_USD_CAP || 50);
 const LLM_REVIEW_MODE = normalizeLlmReviewMode(process.env.LLM_REVIEW_MODE || 'analysis_only');
 const LLM_REVIEW_ALL_NEW_JOBS = process.env.LLM_REVIEW_ALL_NEW_JOBS !== '0';
 const LLM_REVIEW_SCHEMA_VERSION = 3;
+const RULE_ANALYSIS_SCHEMA_VERSION = 4;
 const LLM_JSON_RETRY_ON_PARSE_ERROR = process.env.LLM_JSON_RETRY_ON_PARSE_ERROR !== '0';
 const DEFAULT_OPENROUTER_ANALYSIS_MODEL = 'deepseek/deepseek-v4-flash';
 
@@ -904,6 +912,7 @@ function normalizeFreelancerJob(project) {
   const sourceUrl = seoUrl ? `${trimTrailingSlash(FREELANCER_PROJECT_BASE)}${seoUrl}` : trimTrailingSlash(FREELANCER_PROJECT_BASE);
   const sourceKeyword = stringValue(project.sourceKeyword);
   const budget = cleanFreelancerText(project.budget_range || [project.minbudget, project.maxbudget].filter(Boolean).join(' - '));
+  const budgetMeta = parseMarketplaceBudget(budget);
   const detail = cleanFreelancerText(project.project_desc);
 
   const normalized = {
@@ -926,6 +935,18 @@ function normalizeFreelancerJob(project) {
     catalogId: null,
     skills,
     budget,
+    budgetCurrency: budgetMeta.currency,
+    budgetMin: budgetMeta.min,
+    budgetMax: budgetMeta.max,
+    budgetIsHourly: budgetMeta.isHourly,
+    budgetValueBand: marketplaceValueBand({
+      source: 'freelancer',
+      budget,
+      budgetCurrency: budgetMeta.currency,
+      budgetMin: budgetMeta.min,
+      budgetMax: budgetMeta.max,
+      budgetIsHourly: budgetMeta.isHourly
+    }),
     budgetType: project.is_contest ? 'contest' : 'fixed',
     status: project.is_contest ? 'contest_open' : 'open',
     directApply: Boolean(sourceUrl),
@@ -1207,6 +1228,10 @@ function analyzeJob(job) {
   if (lowFitFreelancerMatches.length) {
     score -= Math.min(34, 16 + lowFitFreelancerMatches.length * 5);
     risks.push(`似銷售/文書/線下驗證而非網站交付：${lowFitFreelancerMatches.slice(0, 4).join('、')}`);
+    if (isMarketplaceJob(job) && !websiteFocusMatches.length && !designFocusMatches.length) {
+      score = Math.min(score, 55);
+      risks.push('即使 budget 高，都唔符合網站/設計交付主線');
+    }
   }
 
   if ((job.source === 'freelancer' || job.source === 'upwork') && hasAny(text, ['manager', 'specialist', 'representative']) && !hasAny(text, ['website build', 'website development', 'web development', 'website design', 'logo design', 'graphic design', 'landing page'])) {
@@ -1250,7 +1275,26 @@ function analyzeJob(job) {
   }
 
   const budgetCeiling = budgetRank(job.budget);
-  if (budgetCeiling >= 50000) {
+  const valueBand = marketplaceValueBand(job);
+  if (isMarketplaceJob(job)) {
+    const budgetMeta = marketplaceBudgetMeta(job);
+    if (valueBand === 'premium') {
+      score += 14;
+      signals.push(`Marketplace 預算較高（${budgetMeta.currency} ${budgetMeta.max}+），值得優先跟`);
+    } else if (valueBand === 'high') {
+      score += 9;
+      signals.push(`Marketplace 預算合理偏高（${budgetMeta.currency} ${budgetMeta.max}），值得跟`);
+    } else if (valueBand === 'worthwhile') {
+      score += 3;
+      signals.push(`Marketplace 預算尚算值得做（${budgetMeta.currency} ${budgetMeta.max}）`);
+    } else if (valueBand === 'borderline') {
+      score -= 8;
+      risks.push(`Marketplace budget 偏低（${job.budget}），只適合非常細 scope / template 化交付`);
+    } else if (valueBand === 'too_low') {
+      score -= 22;
+      risks.push(`Marketplace budget 太低（${job.budget}），即使用 AI 都未必值得 bid`);
+    }
+  } else if (budgetCeiling >= 50000) {
     score += 10;
     signals.push('預算上限高，值得優先跟');
   } else if (budgetCeiling >= 10000) {
@@ -1422,6 +1466,17 @@ function buildAnalysisSummary(status, matchedAreas, missingInfo, risks) {
 }
 
 function buildPricingHint(job, status, matchedAreas) {
+  if (isMarketplaceJob(job)) {
+    const budgetMeta = marketplaceBudgetMeta(job);
+    const valueBand = marketplaceValueBand(job);
+    if (status === 'not_fit') return '唔建議直接 bid。';
+    if (!budgetMeta?.max) return '先問清楚 budget currency、scope 同 deadline，再決定是否值得 bid。';
+    if (valueBand === 'too_low') return `Freelancer budget 太低（${job.budget}）。只適合報 extremely small first milestone，否則 skip。`;
+    if (valueBand === 'borderline') return `Budget 偏低（${job.budget}）。只接清楚、細 scope、少修改嘅版本。`;
+    if (valueBand === 'premium' || valueBand === 'high') return `Budget 較好（${job.budget}）。值得認真寫 proposal，但仍要拆 scope / milestone。`;
+    return `Budget 尚可（${job.budget}）。用固定小 scope 或 first milestone 報價。`;
+  }
+
   const ceiling = budgetRank(job.budget);
   const areaText = matchedAreas.map(areaLabel).join('、') || '項目';
 
@@ -1435,6 +1490,10 @@ function buildPricingHint(job, status, matchedAreas) {
 }
 
 function buildQuoteRecommendation(job, status, matchedAreas, missingInfo, risks) {
+  if (isMarketplaceJob(job)) {
+    return buildMarketplaceQuoteRecommendation(job, status, matchedAreas, missingInfo, risks);
+  }
+
   const budget = inferBudgetRange(job.budget);
   const area = matchedAreas[0] || 'general';
   const base = defaultQuoteForArea(area);
@@ -1461,6 +1520,65 @@ function buildQuoteRecommendation(job, status, matchedAreas, missingInfo, risks)
       ? `我初步會建議以 ${range} 作為項目報價，實際金額可按最終 scope、修改次數同交付格式微調。`
       : `初步睇可以先以 ${range} 作為粗略參考，但我會先問清楚 scope，避免報價同實際需要有落差。`
   };
+}
+
+function buildMarketplaceQuoteRecommendation(job, status, matchedAreas, missingInfo, risks) {
+  const budget = marketplaceBudgetMeta(job) || parseMarketplaceBudget(job.budget);
+  const area = matchedAreas[0] || 'general';
+  const base = defaultMarketplaceQuoteForArea(area, budget.isHourly);
+  const valueBand = marketplaceValueBand(job);
+  const low = budget.max
+    ? Math.max(base.low, Math.round(budget.max * 0.45 / 10) * 10)
+    : base.low;
+  const high = budget.max
+    ? Math.max(base.high, Math.round(budget.max * 0.85 / 10) * 10)
+    : base.high;
+  const cappedHigh = budget.max && valueBand !== 'too_low'
+    ? Math.min(Math.max(high, low), budget.max)
+    : Math.max(high, low);
+  const normalizedLow = Math.min(low, cappedHigh);
+  const normalizedHigh = Math.max(cappedHigh, normalizedLow);
+  const range = budget.isHourly
+    ? `${formatCurrencyRange(budget.currency, normalizedLow, normalizedHigh)} / hr`
+    : formatCurrencyRange(budget.currency, normalizedLow, normalizedHigh);
+  const hasEnoughScope = status === 'easy' && missingInfo.length === 0 && risks.length <= 1;
+  const canQuote = hasEnoughScope && !['too_low', 'borderline'].includes(valueBand);
+  const tightBudget = ['too_low', 'borderline'].includes(valueBand);
+
+  return {
+    canQuote,
+    range,
+    low: normalizedLow,
+    high: normalizedHigh,
+    currency: budget.currency || 'USD',
+    confidence: canQuote ? 'medium' : 'low',
+    basis: canQuote
+      ? 'Based on the Freelancer budget, scope signals, and a controlled first milestone.'
+      : tightBudget
+        ? 'The posted marketplace budget is low, so bid only if the scope is very small or the first milestone is tightly limited.'
+        : 'The scope is not clear enough for a firm quote yet.',
+    assumptions: buildQuoteAssumptions(job, area),
+    quoteLine: canQuote
+      ? `My initial estimate is ${range}, depending on the final scope, assets, and revision count.`
+      : tightBudget
+        ? `The posted budget looks tight for full delivery; I would only bid if we keep the first milestone small and clearly scoped.`
+        : `I can confirm a fixed quote once the exact scope, assets, timeline, and review process are clear.`
+  };
+}
+
+function defaultMarketplaceQuoteForArea(area, isHourly = false) {
+  if (isHourly) {
+    if (area === 'development') return { low: 25, high: 45 };
+    if (area === 'design') return { low: 20, high: 40 };
+    if (area === 'content') return { low: 18, high: 35 };
+    return { low: 20, high: 40 };
+  }
+
+  if (area === 'development') return { low: 300, high: 900 };
+  if (area === 'design') return { low: 120, high: 450 };
+  if (area === 'content') return { low: 80, high: 300 };
+  if (area === 'video') return { low: 120, high: 500 };
+  return { low: 150, high: 500 };
 }
 
 function buildExecutionPlan(job, matchedAreas, status) {
@@ -1548,8 +1666,74 @@ function formatHkdRange(low, high) {
   return `HKD ${formatter.format(low)}-${formatter.format(high)}`;
 }
 
+function formatCurrencyRange(currency, low, high) {
+  const formatter = new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: currency || 'USD',
+    maximumFractionDigits: 0
+  });
+  if (!high || low === high) return formatter.format(low);
+  return `${formatter.format(low)}-${formatter.format(high)}`;
+}
+
 function isMarketplaceJob(job = {}) {
   return job.source === 'freelancer' || job.source === 'upwork';
+}
+
+function marketplaceBudgetMeta(job = {}) {
+  if (!isMarketplaceJob(job)) return null;
+  if (job.budgetCurrency || job.budgetMax || job.budgetMin) {
+    return {
+      currency: job.budgetCurrency || inferCurrencyFromBudget(job.budget),
+      min: Number(job.budgetMin || 0) || 0,
+      max: Number(job.budgetMax || 0) || budgetRank(job.budget),
+      isHourly: Boolean(job.budgetIsHourly) || /\/\s*(hr|hour)/i.test(String(job.budget || ''))
+    };
+  }
+  return parseMarketplaceBudget(job.budget);
+}
+
+function parseMarketplaceBudget(value) {
+  const label = cleanFreelancerText(value);
+  const numbers = label
+    .replace(/,/g, '')
+    .match(/\d+(?:\.\d+)?/g)
+    ?.map(Number) || [];
+  const currency = inferCurrencyFromBudget(label);
+  return {
+    currency,
+    min: numbers[0] || 0,
+    max: numbers.length ? Math.max(...numbers) : 0,
+    isHourly: /\/\s*(hr|hour)/i.test(label)
+  };
+}
+
+function inferCurrencyFromBudget(value) {
+  const label = String(value || '').trim();
+  if (/\bUSD\b/i.test(label) || label.includes('$')) return 'USD';
+  if (/\bSGD\b/i.test(label) || /S\$/i.test(label)) return 'SGD';
+  if (/\bHKD\b/i.test(label) || /HK\$/i.test(label)) return 'HKD';
+  if (/\bAUD\b/i.test(label) || /A\$/i.test(label)) return 'AUD';
+  if (/\bCAD\b/i.test(label) || /C\$/i.test(label)) return 'CAD';
+  if (/\bGBP\b/i.test(label) || label.includes('£')) return 'GBP';
+  if (/\bEUR\b/i.test(label) || label.includes('€')) return 'EUR';
+  return 'USD';
+}
+
+function marketplaceValueBand(job = {}) {
+  const meta = marketplaceBudgetMeta(job);
+  if (!meta || !meta.max) return 'unknown';
+  if (meta.isHourly) {
+    if (meta.max < MARKETPLACE_LOW_HOURLY_USD_MAX) return 'too_low';
+    if (meta.max >= MARKETPLACE_HIGH_HOURLY_USD_MIN) return 'high';
+    if (meta.max >= MARKETPLACE_MIN_WORTHWHILE_HOURLY_USD) return 'worthwhile';
+    return 'borderline';
+  }
+  if (meta.max < MARKETPLACE_LOW_FIXED_USD_MAX) return 'too_low';
+  if (meta.max >= MARKETPLACE_PREMIUM_FIXED_USD_MIN) return 'premium';
+  if (meta.max >= MARKETPLACE_HIGH_FIXED_USD_MIN) return 'high';
+  if (meta.max >= MARKETPLACE_MIN_WORTHWHILE_FIXED_USD) return 'worthwhile';
+  return 'borderline';
 }
 
 function buildEmailDraft(job, analysis) {
@@ -1624,11 +1808,9 @@ function buildFreelancerProposalDraft(job, analysis) {
   const questions = buildFreelancerQuestions(analysis.missingInfo, job);
   const executionPlan = buildMarketplaceExecutionPlan(job);
   const deliveryTime = estimateMarketplaceDeliveryTime(job, analysis);
-  const quoteLine = quote.canQuote && quote.range
-    ? `My initial estimate is ${quote.range.replace('HKD', 'around HKD')}, depending on the final scope and assets.`
-    : quote.range
-      ? `As a rough direction, this looks like ${quote.range.replace('HKD', 'around HKD')}, but I would confirm the final quote after the details below.`
-      : 'I can confirm a fixed quote once the exact scope, assets, and timeline are clear.';
+  const quoteLine = quote.quoteLine || (quote.canQuote && quote.range
+    ? `My initial estimate is ${quote.range}, depending on the final scope and assets.`
+    : 'I can confirm a fixed quote once the exact scope, assets, and timeline are clear.');
   const intro = summarizeMarketplaceUnderstanding(job);
 
   const body = [
@@ -2281,6 +2463,7 @@ function countReusedLlmReviews(jobs) {
 function jobContentSignature(job) {
   return createHash('sha256')
     .update(stableStringify({
+      ruleAnalysisSchemaVersion: RULE_ANALYSIS_SCHEMA_VERSION,
       id: job.id,
       title: job.title,
       detail: job.detail,
@@ -2290,6 +2473,11 @@ function jobContentSignature(job) {
       categoryName: job.categoryName,
       skills: job.skills,
       budget: job.budget,
+      budgetCurrency: job.budgetCurrency,
+      budgetMin: job.budgetMin,
+      budgetMax: job.budgetMax,
+      budgetIsHourly: job.budgetIsHourly,
+      budgetValueBand: job.budgetValueBand,
       duration: job.duration,
       location: job.location,
       createdAtSeconds: job.createdAtSeconds,
@@ -2379,14 +2567,20 @@ function mergeJobsIntoStore(jobs, store) {
         changed = true;
       }
       job.aiAnalysis = normalizeAnalysisForDisplay(job, job.aiAnalysis);
-      if (!opportunity.draft || opportunity.draft.status === 'generated') {
-        opportunity.draft = draftFromAnalysis(job.aiAnalysis, opportunity.draft?.status || 'generated', nowIso, opportunity.draft);
-        changed = true;
-      }
       const signature = jobContentSignature(job);
       const previousAnalysisText = JSON.stringify(opportunity.aiAnalysis || null);
       const nextAnalysisText = JSON.stringify(job.aiAnalysis || null);
-      if (opportunity.aiAnalysisSignature !== signature || previousAnalysisText !== nextAnalysisText) {
+      const analysisChanged = opportunity.aiAnalysisSignature !== signature || previousAnalysisText !== nextAnalysisText;
+      if (!opportunity.draft || opportunity.draft.status === 'generated' || (analysisChanged && opportunity.draft.source === 'rule_fallback')) {
+        opportunity.draft = draftFromAnalysis(
+          job.aiAnalysis,
+          opportunity.draft?.status || 'generated',
+          nowIso,
+          analysisChanged ? {} : opportunity.draft
+        );
+        changed = true;
+      }
+      if (analysisChanged) {
         opportunity.aiAnalysis = job.aiAnalysis || null;
         opportunity.aiAnalysisSignature = signature;
         opportunity.aiAnalysisUpdatedAt = nowIso;

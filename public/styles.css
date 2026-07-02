@@ -606,6 +606,26 @@ h2 {
   background: #e8f4ef;
 }
 
+.tag.value-premium,
+.tag.value-high,
+.tag.value-worthwhile {
+  border-color: #8ccab5;
+  color: var(--green);
+  background: var(--green-soft);
+}
+
+.tag.value-borderline {
+  border-color: #ead489;
+  color: var(--amber);
+  background: var(--amber-soft);
+}
+
+.tag.value-too-low {
+  border-color: #edb2aa;
+  color: var(--red);
+  background: var(--red-soft);
+}
+
 .tag.project-ready-for-worker,
 .tag.project-in-progress,
 .tag.project-ready-to-deliver {

@@ -331,10 +331,17 @@ function matchesLeadView(job, view) {
   const highScore = scoreValue(job) >= 70;
   const missing = Array.isArray(analysis.missingInfo) && analysis.missingInfo.length > 0;
   const canQuote = Boolean(analysis.quoteRecommendation?.canQuote);
+  const value = marketplaceValue(job);
+  const risks = Array.isArray(analysis.risks) ? analysis.risks.join(' ') : '';
+  const marketplaceWrongFit = /銷售|文書|線下驗證|長期角色|營銷職位|not.*網站|not.*設計/i.test(risks);
+  const marketplaceComplex = /開發範圍可能較大|真人|現場|合規|專業/i.test(risks);
   if (view === 'high_easy') return highScore && easyValue(job) >= 70 && analysis.status === 'easy';
   if (view === 'high_missing') return highScore && missing;
   if (view === 'high_questions') return highScore && (analysis.status === 'needs_info' || analysis.recommendedNextStep === 'ask_for_details' || missing);
   if (view === 'high_quote') return highScore && canQuote;
+  if (view === 'high_value') return highScore && ['worthwhile', 'high', 'premium'].includes(value.band) && !marketplaceWrongFit && analysis.status !== 'not_fit';
+  if (view === 'high_value_easy') return highScore && easyValue(job) >= 60 && ['worthwhile', 'high', 'premium'].includes(value.band) && marketplaceSimpleWebsiteOrDesign(job) && !marketplaceWrongFit && !marketplaceComplex && analysis.status !== 'not_fit';
+  if (view === 'low_value') return ['too_low', 'borderline'].includes(value.band);
   return true;
 }
 
@@ -422,6 +429,7 @@ function renderJobList() {
             ${tag(`Easy ${easyScore}`, `difficulty-${difficultyBucket(easyScore)}`)}
             ${tag(draftSource.shortLabel, draftSource.className)}
             ${tag(pipelineStatusLabels[pipelineStatus] || pipelineStatus, `pipe-${slug(pipelineStatus)}`)}
+            ${marketplaceValueTag(job)}
             ${retainer.isCandidate ? tag('AI retainer exp', 'retainer-tag') : ''}
             ${tag(job.categoryName || 'No category')}
             ${tag(job.budget || 'No budget')}
@@ -503,6 +511,7 @@ function renderDetail() {
           ${tag(source.label, source.className)}
           ${tag(draftSource.label, draftSource.className)}
           ${tag(pipelineStatusLabels[pipelineStatus] || pipelineStatus, `pipe-${slug(pipelineStatus)}`)}
+          ${marketplaceValueTag(job)}
           ${retainer.isCandidate ? tag('AI retainer exp', 'retainer-tag') : ''}
           ${job.directApply ? tag('Direct apply', 'email-ok') : ''}
         </div>
@@ -562,6 +571,7 @@ function renderDetail() {
       ${fact('Pricing', analysis.pricingHint || '-')}
       ${fact('Client', `${job.clientName || '-'}${job.clientId ? ` · ID ${job.clientId}` : ''}`)}
       ${fact('Budget', job.budget || '-')}
+      ${fact('Budget Value', budgetValueDetail(job))}
       ${fact('Category', job.categoryName || '-')}
       ${fact('Duration', durationLabels[job.duration] || job.duration || '-')}
       ${fact('Location', [job.location, job.posterLocation].filter(Boolean).join(' · ') || '-')}
@@ -1134,6 +1144,70 @@ function budgetRank(budget) {
     .match(/\d+/g)
     ?.map(Number);
   return numbers?.length ? Math.max(...numbers) : 0;
+}
+
+function marketplaceValue(job = {}) {
+  if (!['freelancer', 'upwork'].includes(job.source)) return { band: 'unknown', label: '' };
+  const max = Number(job.budgetMax || 0) || budgetRank(job.budget);
+  const isHourly = Boolean(job.budgetIsHourly) || /\/\s*(hr|hour)/i.test(String(job.budget || ''));
+  if (!max) return { band: 'unknown', label: 'Budget unknown' };
+
+  if (isHourly) {
+    if (max < 15) return { band: 'too_low', label: 'Too low' };
+    if (max >= 30) return { band: 'high', label: 'High hourly' };
+    if (max >= 20) return { band: 'worthwhile', label: 'Worthwhile' };
+    return { band: 'borderline', label: 'Low budget' };
+  }
+
+  if (max < 150) return { band: 'too_low', label: 'Too low' };
+  if (max >= 1000) return { band: 'premium', label: 'Premium' };
+  if (max >= 500) return { band: 'high', label: 'High value' };
+  if (max >= 250) return { band: 'worthwhile', label: 'Worthwhile' };
+  return { band: 'borderline', label: 'Low budget' };
+}
+
+function marketplaceValueTag(job) {
+  const value = marketplaceValue(job);
+  if (!value.label) return '';
+  return tag(value.label, `value-${slug(value.band)}`);
+}
+
+function marketplaceSimpleWebsiteOrDesign(job = {}) {
+  const haystack = [
+    job.title,
+    job.detail,
+    job.categoryName,
+    ...(job.skills || [])
+  ].join(' ').toLowerCase();
+  return [
+    'website',
+    'web design',
+    'website design',
+    'landing page',
+    'wordpress',
+    'wix',
+    'shopify',
+    'portfolio',
+    'brochure',
+    'logo',
+    'graphic design',
+    'branding',
+    'figma',
+    'ui design'
+  ].some((term) => haystack.includes(term));
+}
+
+function budgetValueDetail(job) {
+  const value = marketplaceValue(job);
+  const currency = job.budgetCurrency || (String(job.budget || '').includes('$') ? 'USD' : '');
+  const max = Number(job.budgetMax || 0) || budgetRank(job.budget);
+  const hourly = job.budgetIsHourly || /\/\s*(hr|hour)/i.test(String(job.budget || ''));
+  if (!value.label && !currency && !max) return '-';
+  return [
+    value.label || '',
+    currency ? `Currency: ${currency}` : '',
+    max ? `Max: ${currency ? `${currency} ` : ''}${max}${hourly ? '/hr' : ''}` : ''
+  ].filter(Boolean).join(' · ');
 }
 
 async function copyText(text, successMessage) {
